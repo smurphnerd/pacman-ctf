@@ -41,7 +41,7 @@ from torch_geometric.nn import SAGEConv, global_mean_pool
 
 class SmurphGNN(nn.Module):
     def __init__(self, num_node_features: int, num_actions: int, hidden_channels=32):
-        super(PacmanGNN, self).__init__()
+        super(SmurphGNN, self).__init__()
         # Use a small MLP to encode the initial node features
         self.node_encoder = nn.Linear(num_node_features, hidden_channels)
 
@@ -70,7 +70,7 @@ class SmurphGNN(nn.Module):
 
         # 3. Get the embedding for the current agent's node
         # We need to know which node in the graph corresponds to our agent
-        agent_node_embedding = x[data.agent_node_idx]
+        agent_node_embedding = x[data.node_idx]
 
         # 4. Calculate policy and value
         action_logits = self.policy_head(agent_node_embedding)
@@ -182,7 +182,7 @@ class SmurphAgent(CaptureAgent):
         team_key = self._get_team_key()
         self._last_belief_update_timestep[team_key] = current_timestep
 
-        node_features, edge_index = self._get_graph_state(gameState)
+        node_features = self._get_graph_state(gameState)
         my_pos = gameState.getAgentPosition(self.index)
         assert my_pos in self.node_map
 
