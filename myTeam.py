@@ -26,7 +26,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 from numpy import true_divide
-import torch
+
+# import torch
 from captureAgents import CaptureAgent
 import distanceCalculator
 import random, time, util, sys, os
@@ -36,18 +37,39 @@ from util import nearestPoint
 import sys, os
 
 
-HIDDEN_LAYERS = [300, 200, 100]
-RECEPTIVE_RANGE = 9
+def benchmark(duration_seconds=1.0):
+    """
+    Performs a series of simple arithmetic operations for a fixed duration
+    to estimate the number of operations per second a machine can handle
+    in pure Python.
+    """
+    operations = 0
+    # Use simple, fast operations
+    a, b, c = 1.01, 2.02, 3.03
 
+    start_time = time.time()
+    end_time = start_time + duration_seconds
 
-class CellType(IntEnum):
-    WALL = 0
-    EMPTY_ALLY_TERRITORY = 1  # Empty space on our side
-    ALLY_FOOD = 2  # Food we need to defend
-    ALLY_CAPSULE = 3  # Capsules we need to defend
-    EMPTY_ENEMY_TERRITORY = 4  # Empty space on enemy side
-    ENEMY_FOOD = 5  # Food we can eat
-    ENEMY_CAPSULE = 6  # Capsules we can eat
+    while time.time() < end_time:
+        # Perform a small, fixed number of operations per loop
+        # to reduce the overhead of the time.time() check.
+        # 10 operations per loop:
+        d = a * b
+        e = d + c
+        f = e * a
+        g = f + b
+        h = g * c
+        i = h + a
+        j = i * d
+        k = j + e
+        l = k * f
+        m = l + g
+        operations += 10
+
+    total_time = time.time() - start_time
+    ops_per_second = operations / total_time
+
+    return operations, total_time, ops_per_second
 
 
 def createTeam(firstIndex, secondIndex, isRed, **kwargs):
@@ -63,16 +85,13 @@ def createTeam(firstIndex, secondIndex, isRed, **kwargs):
 @dataclass
 class SmurphAgentConfig:
     name: str
-    weights: torch.Tensor
+    # weights: torch.Tensor
     alpha: float  # learning rate
     discount_rate: float
     epsilon: float  # exploration prob
 
 
 class SmurphAgent(CaptureAgent):
-    # Class variable to store pre-generated relative offsets (shared across all agents)
-    _relative_offsets: List[Tuple[int, int]] = []
-
     # Shared belief distributions for opponent positions (per team)
     # Dict mapping (team_color, opponent_idx) -> 2D probability array
     # team_color is "red" or "blue"
@@ -83,15 +102,10 @@ class SmurphAgent(CaptureAgent):
     _last_belief_update_timestep: Dict[str, int] = {}
 
     def registerInitialState(self, gameState: GameState):
-        CaptureAgent.registerInitialState(self, gameState)
+        res = benchmark(duration_seconds=1.0)
+        raise Exception(f"res: {res}")
 
-        # Generate relative offsets once for all agents
-        self.receptive_state_size = self.get_expected_state_size(RECEPTIVE_RANGE)
-        if len(SmurphAgent._relative_offsets) != self.receptive_state_size:
-            SmurphAgent._relative_offsets = self._generate_relative_offsets(
-                RECEPTIVE_RANGE
-            )
-        assert len(SmurphAgent._relative_offsets) == self.receptive_state_size
+        CaptureAgent.registerInitialState(self, gameState)
 
     def final(self, gameState: GameState):
         pass
@@ -167,10 +181,10 @@ class SmurphAgent(CaptureAgent):
             )
 
         # Normalize to [0, 1] range
-        return (
-            torch.tensor(receptive_state_array, dtype=torch.float32)
-            / max(CellType).value
-        )
+        # return (
+        #     torch.tensor(receptive_state_array, dtype=torch.float32)
+        #     / max(CellType).value
+        # )
 
     @staticmethod
     def get_expected_state_size(receptive_range):
