@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 from numpy import true_divide
-# import torch
+import torch
 from captureAgents import CaptureAgent
 import distanceCalculator
 import random, time, util, sys, os
@@ -63,7 +63,7 @@ def createTeam(firstIndex, secondIndex, isRed, **kwargs):
 @dataclass
 class SmurphAgentConfig:
     name: str
-    # weights: torch.Tensor
+    weights: torch.Tensor
     alpha: float  # learning rate
     discount_rate: float
     epsilon: float  # exploration prob
@@ -134,10 +134,7 @@ class SmurphAgent(CaptureAgent):
         # self.displayDistributionsOverPositions(belief_counters)
 
         # TODO: Implement your actual action selection logic here
-        time.sleep(1)
         actions = gameState.getLegalActions(self.index)
-        from capture import CaptureRules
-
         return random.choice(actions)
 
     def __init__(self, index, config_path):
@@ -170,10 +167,10 @@ class SmurphAgent(CaptureAgent):
             )
 
         # Normalize to [0, 1] range
-        # return (
-        #     torch.tensor(receptive_state_array, dtype=torch.float32)
-        #     / max(CellType).value
-        # )
+        return (
+            torch.tensor(receptive_state_array, dtype=torch.float32)
+            / max(CellType).value
+        )
 
     @staticmethod
     def get_expected_state_size(receptive_range):
