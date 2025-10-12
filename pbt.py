@@ -8,9 +8,9 @@ from dataclasses import replace
 trainer_procs = {}
 
 PBT_CFG = {
-    "population_size": 12,
-    "concurrent_games": 4,
-    "games_per_match": 3,
+    "population_size": 5,
+    "concurrent_games": 1,
+    "games_per_match": 1,
     "exploit_interval": 200,
     "burn_in_games": 20,
     "elo_K": 32,
@@ -128,7 +128,7 @@ def launch_trainers(agent_ids):
     return procs
 
 
-def run_game_homogeneous(A_id, B_id, num_games=1, layout=None, timeout=120):
+def run_game_homogeneous(A_id, B_id, num_games=1, layout=None):
     """
     Runs capture.py with:
       -r myTeam -b myTeam
@@ -165,7 +165,7 @@ def run_game_homogeneous(A_id, B_id, num_games=1, layout=None, timeout=120):
 
     try:
         print(f"  [Game] Running command: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, timeout=timeout, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode != 0:
             print(f"  [Game] Non-zero exit code: {result.returncode}")
@@ -176,15 +176,16 @@ def run_game_homogeneous(A_id, B_id, num_games=1, layout=None, timeout=120):
             print(f"  [Game] Completed successfully, reading results...")
             with open(results_path, "r") as f:
                 data = json.load(f)
-    except subprocess.TimeoutExpired:
-        print(f"  [Game] TIMEOUT after {timeout}s")
-        data = None
     except subprocess.CalledProcessError as e:
-        print(f"  [Game] subprocess failed:", e.output.decode("utf-8", errors="ignore")[:500])
+        print(
+            f"  [Game] subprocess failed:",
+            e.output.decode("utf-8", errors="ignore")[:500],
+        )
         data = None
     except Exception as e:
         print(f"  [Game] Exception: {type(e).__name__}: {e}")
         import traceback
+
         traceback.print_exc()
         data = None
     finally:
@@ -378,11 +379,14 @@ def population_based_training(default_cfg: SmurphAgentConfig, reset=False):
             # Submit all games
             futures = {}
             for red_id, blue_id in pairs:
-                print(f"  [Game] Queueing: Agent {red_id} (Red) vs Agent {blue_id} (Blue)")
+                print(
+                    f"  [Game] Queueing: Agent {red_id} (Red) vs Agent {blue_id} (Blue)"
+                )
                 future = executor.submit(
                     run_game_homogeneous,
-                    red_id, blue_id,
-                    num_games=PBT_CFG["games_per_match"]
+                    red_id,
+                    blue_id,
+                    num_games=PBT_CFG["games_per_match"],
                 )
                 futures[future] = (red_id, blue_id)
 
@@ -392,9 +396,13 @@ def population_based_training(default_cfg: SmurphAgentConfig, reset=False):
                 try:
                     res = future.result()
                     if res:
-                        print(f"  [Game] Completed: Agent {red_id} vs {blue_id} | Results: {res.get('results', [])} | Scores: {res.get('scores', [])}")
+                        print(
+                            f"  [Game] Completed: Agent {red_id} vs {blue_id} | Results: {res.get('results', [])} | Scores: {res.get('scores', [])}"
+                        )
                     else:
-                        print(f"  [Game] FAILED: Agent {red_id} vs {blue_id} - no results returned")
+                        print(
+                            f"  [Game] FAILED: Agent {red_id} vs {blue_id} - no results returned"
+                        )
 
                     ng = apply_elo_from_results(
                         ratings, red_id, blue_id, res, K=PBT_CFG["elo_K"]
@@ -412,13 +420,16 @@ def population_based_training(default_cfg: SmurphAgentConfig, reset=False):
                 except Exception as e:
                     print(f"  [Game] Exception in game {red_id} vs {blue_id}: {e}")
                     import traceback
+
                     traceback.print_exc()
 
         # Print progress after each round of concurrent games
         print(f"[Gen {generation:4d}] Games: {total_games:5d} | ", end="")
         sorted_agents = sorted(ratings.items(), key=lambda x: x[1], reverse=True)
         top3 = sorted_agents[:3]
-        print(f"Top3: {top3[0][0]}({top3[0][1]:.0f}) {top3[1][0]}({top3[1][1]:.0f}) {top3[2][0]}({top3[2][1]:.0f})")
+        print(
+            f"Top3: {top3[0][0]}({top3[0][1]:.0f}) {top3[1][0]}({top3[1][1]:.0f}) {top3[2][0]}({top3[2][1]:.0f})"
+        )
 
         generation += 1
 
@@ -430,7 +441,9 @@ def population_based_training(default_cfg: SmurphAgentConfig, reset=False):
             sorted_agents = sorted(ratings.items(), key=lambda x: x[1], reverse=True)
             for rank, (agent_id, elo) in enumerate(sorted_agents[:5], 1):
                 cfg = torch.load(f"configs/{agent_id}.pt")
-                print(f"  {rank}. Agent {agent_id:2d}: ELO={elo:7.1f} Games={cfg.games_played:4d}")
+                print(
+                    f"  {rank}. Agent {agent_id:2d}: ELO={elo:7.1f} Games={cfg.games_played:4d}"
+                )
             print()
 
         if total_games % 50 == 0 or total_games % PBT_CFG["games_per_match"] == 0:
@@ -440,7 +453,15 @@ def population_based_training(default_cfg: SmurphAgentConfig, reset=False):
                 json.dump(ratings, f, indent=2)
             # Save detailed status
             with open("logs/pbt_status.json", "w") as f:
-                json.dump({"games": total_games, "ratings": ratings, "generation": generation}, f, indent=2)
+                json.dump(
+                    {
+                        "games": total_games,
+                        "ratings": ratings,
+                        "generation": generation,
+                    },
+                    f,
+                    indent=2,
+                )
 
         time.sleep(0.2)
 
