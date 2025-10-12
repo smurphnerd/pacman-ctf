@@ -20,23 +20,25 @@
 # John DeNero (denero@cs.berkeley.edu) and Dan Klein (klein@cs.berkeley.edu).
 # For more info, see http://inst.eecs.berkeley.edu/~cs188/sp09/pacman.html
 
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Literal
 from dataclasses import dataclass
 from enum import IntEnum
+from collections import deque, namedtuple
 
+from capture import COLLISION_TOLERANCE
 from captureAgents import CaptureAgent
 import distanceCalculator
-import random, time, util, sys, os
+import random, time, util, sys, os, math, uuid
 from capture import GameState, noisyDistance
 from game import Directions, Actions, AgentState, Agent, Grid
-from util import nearestPoint
+from util import nearestPoint, manhattanDistance
 import sys, os
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.data import Data
-from torch_geometric.nn import SAGEConv, global_mean_pool
+from torch_geometric.nn import SAGEConv
 
 
 class SmurphGNN(nn.Module):
@@ -48,40 +50,41 @@ class SmurphGNN(nn.Module):
         # GraphSAGE layers for message passing
         self.conv1 = SAGEConv(hidden_channels, hidden_channels)
         self.conv2 = SAGEConv(hidden_channels, hidden_channels)
-
-        # --- Output Heads ---
-        # 1. Policy head: Decides which action to take
-        self.policy_head = nn.Linear(hidden_channels, num_actions)
-
-        # 2. Value head: Estimates the quality of the current state
-        self.value_head = nn.Linear(hidden_channels, 1)
+        self.q_head = nn.Linear(hidden_channels, num_actions)
 
     def forward(self, data: Data):
-        x, edge_index, batch = data.x, data.edge_index, data.batch
+        x, edge_index = data.x, data.edge_index
 
-        # 1. Encode initial node features
         x = self.node_encoder(x)
         x = F.relu(x)
-
-        # 2. Perform message passing
         x = self.conv1(x, edge_index)
         x = F.relu(x)
         x = self.conv2(x, edge_index)
 
-        # 3. Get the embedding for the current agent's node
-        # We need to know which node in the graph corresponds to our agent
         agent_node_embedding = x[data.node_idx]
 
-        # 4. Calculate policy and value
-        action_logits = self.policy_head(agent_node_embedding)
+        q_values = self.q_head(agent_node_embedding)
+        return q_values
 
-        # For the state value, we can use a global representation
-        # by pooling all node embeddings
-        global_graph_embedding = global_mean_pool(x, batch)
-        state_value = self.value_head(global_graph_embedding)
 
-        # Return action probabilities and the state value
-        return F.softmax(action_logits, dim=-1), torch.tanh(state_value)
+Transition = namedtuple(
+    "Transition", ("state", "action", "reward", "next_state", "done")
+)
+
+
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.memory = deque([], maxlen=capacity)
+
+    def push(self, *args):
+        """Save a transition"""
+        self.memory.append(Transition(*args))
+
+    def sample(self, batch_size):
+        return random.sample(self.memory, batch_size)
+
+    def __len__(self):
+        return len(self.memory)
 
 
 class CellType(IntEnum):
@@ -95,22 +98,37 @@ class CellType(IntEnum):
 
 
 def createTeam(firstIndex, secondIndex, isRed, **kwargs):
-    first_config = kwargs.get("first")
-    second_config = kwargs.get("second")
-
     return [
-        SmurphAgent(firstIndex, first_config),
-        SmurphAgent(secondIndex, second_config),
+        SmurphAgent(firstIndex, isRed, **kwargs),
+        SmurphAgent(secondIndex, isRed, **kwargs),
     ]
 
 
 @dataclass
+class RewardWeights:
+    score_change: float
+    scored_points: float
+    eaten_as_invader: float
+    eaten_as_scared_ghost: float
+    ate_food: float
+    ate_capsule: float
+    ate_invader: float
+    ate_scared_ghost: float
+    food_eaten_by_opponent: float
+    capsule_eaten_by_opponent: float
+    time_penalty: float
+
+
+@dataclass
 class SmurphAgentConfig:
-    name: str
-    model: SmurphGNN
-    alpha: float  # learning rate
-    discount_rate: float
-    epsilon: float  # exploration prob
+    id: int
+    reward_weights: RewardWeights
+    learning_rate: float
+    gamma: float
+    epsilon_decay: float
+    epsilon: float
+    epsilon_min: float
+    games_played: int
 
 
 class SmurphAgent(CaptureAgent):
@@ -132,6 +150,28 @@ class SmurphAgent(CaptureAgent):
     }
 
     DIR_TO_IDX = {v: k for k, v in IDX_TO_DIR.items()}
+
+    def __init__(self, index, isRed, **kwargs):
+        super().__init__(index)
+
+        if isRed:
+            self.config_path = kwargs.get("redCfg")
+        else:
+            self.config_path = kwargs.get("blueCfg")
+
+        self.mode: Literal["inference", "training"] = kwargs.get("mode", "inference")
+        self.device = torch.device("cpu")
+        self.config: SmurphAgentConfig = torch.load(self.config_path)
+        assert isinstance(self.config, SmurphAgentConfig)
+
+        self.policy_net = SmurphGNN(11, 5, hidden_channels=32)
+        self.policy_net.load_state_dict(torch.load(self._get_weights_path()))
+        self.policy_net.to(self.device)
+
+        if self.mode == "training":
+            self.episode_memory: List[Transition] = []
+            self.previous_action_idx = None
+            self.previous_state_graph = None
 
     def registerInitialState(self, gameState: GameState):
         CaptureAgent.registerInitialState(self, gameState)
@@ -162,13 +202,11 @@ class SmurphAgent(CaptureAgent):
                     neighbor_node_idx = self.node_map[neighbor_pos]
                     self.graph_edge_index.append([current_node_idx, neighbor_node_idx])
 
-    def final(self, gameState: GameState):
-        pass
-
     def chooseAction(self, gameState: GameState):
         """
         Example implementation showing how to use belief tracking.
         """
+        # --- 1. Belief Tracking ---
         if len(self.observationHistory) <= 1:
             # Initialize beliefs on first call
             self._initialize_beliefs_if_needed(gameState)
@@ -180,8 +218,9 @@ class SmurphAgent(CaptureAgent):
         # Mark this timestep as updated for this team (after all opponents processed)
         current_timestep = len(self.observationHistory) - 1
         team_key = self._get_team_key()
-        self._last_belief_update_timestep[team_key] = current_timestep
+        SmurphAgent._last_belief_update_timestep[team_key] = current_timestep
 
+        # --- 2. Get the current state graph ---
         node_features = self._get_graph_state(gameState)
         my_pos = gameState.getAgentPosition(self.index)
         assert my_pos in self.node_map
@@ -194,57 +233,204 @@ class SmurphAgent(CaptureAgent):
             self.graph_edge_index, dtype=torch.long, device=self.device
         ).T.contiguous()
 
-        data = Data(x=x, edge_index=edge_index, node_idx=my_idx)
+        current_state_graph = Data(x=x, edge_index=edge_index, node_idx=my_idx)
 
-        self.model.eval()
-        with torch.no_grad():
-            action_probs, state_value = self.model(data)
-            action_probs = action_probs.squeeze(0)
+        # --- 3. Calculate the reward for the previous state ---
+        if self.mode == "training":
+            previous_state = self.getPreviousObservation()
+            if previous_state:
+                assert (
+                    self.previous_state_graph is not None
+                    and self.previous_action_idx is not None
+                )
+                reward = self._calculate_reward(previous_state, gameState)
+                self.episode_memory.append(
+                    Transition(
+                        self.previous_state_graph,
+                        self.previous_action_idx,
+                        reward,
+                        current_state_graph,
+                        False,
+                    )
+                )
+            self._upload_experiences()
 
+        # --- 4. Choose an action ---
         legal_actions = gameState.getLegalActions(self.index)
 
-        best_action = None
-        max_prob = -float("inf")
-
-        for action in legal_actions:
-            action_idx = self.DIR_TO_IDX.get(action)
-            prob = action_probs[action_idx].item()
-            if prob > max_prob:
-                max_prob = prob
-                best_action = action
-
-        assert best_action is not None
-
-        return best_action
-
-    def __init__(self, index, config_path):
-        super().__init__(index)
-
-        if config_path:
-            config = torch.load(config_path)
-            assert isinstance(config, SmurphAgentConfig)
-            self.config = config
+        epsilon = self.config.epsilon_min + (
+            self.config.epsilon - self.config.epsilon_min
+        ) * math.exp(-1.0 * self.config.games_played / self.config.epsilon_decay)
+        if random.random() < epsilon:
+            action = random.choice(legal_actions)
         else:
-            model = SmurphGNN(num_node_features=11, num_actions=5)
+            self.policy_net.eval()
+            with torch.no_grad():
+                q_vals = self.policy_net(current_state_graph)
 
-            self.config = SmurphAgentConfig(
-                name="SmurphAgent",
-                model=model,
-                alpha=0.1,
-                discount_rate=0.99,
-                epsilon=0.1,
-            )
+            action = None
+            max_q = -float("inf")
 
-        self.device = torch.device(
-            "cuda"
-            if torch.cuda.is_available()
-            else "mps"
-            if torch.backends.mps.is_available()
-            else "cpu"
-        )
+            for legal_action in legal_actions:
+                q_val = q_vals[self.DIR_TO_IDX[legal_action]].item()
+                if q_val > max_q:
+                    max_q = q_val
+                    action = legal_action
 
-        self.model = self.config.model
-        self.model.to(self.device)
+        assert action is not None
+
+        # --- 5. Save state for next action ---
+        if self.mode == "training":
+            self.previous_action_idx = self.DIR_TO_IDX[action]
+            self.previous_state_graph = current_state_graph
+
+        return action
+
+    def final(self, gameState: GameState):
+        """This is called at the end of a game to trigger training."""
+        if self.mode == "training":
+            previous_state = self.getPreviousObservation()
+            if previous_state:
+                reward = self._calculate_reward(previous_state, gameState)
+                self.episode_memory.append(
+                    Transition(
+                        self.previous_state_graph,
+                        self.previous_action_idx,
+                        reward,
+                        None,
+                        True,
+                    )
+                )
+
+            self._upload_experiences(force=True)
+
+    def _calculate_reward(
+        self, prev_gameState: GameState, current_gameState: GameState
+    ):
+        """
+        Event-based reward with robust disambiguation and partial-observability safeguards.
+        """
+        reward = 0.0
+        w = self.config.reward_weights
+
+        # --- Shortcuts
+        my_prev = prev_gameState.getAgentState(self.index)
+        my_curr = current_gameState.getAgentState(self.index)
+        my_prev_pos = my_prev.getPosition()
+        my_curr_pos = my_curr.getPosition()
+
+        def manh(a, b):
+            return None if (a is None or b is None) else manhattanDistance(a, b)
+
+        def near(a, b, tol):
+            d = manh(a, b)
+            return (d is not None) and (d <= tol)
+
+        # ----- 1) Global signals
+
+        # Score delta from *our team's* perspective (Red-Blue from env)
+        score_delta = current_gameState.getScore() - prev_gameState.getScore()
+        if not self.red:  # flip for blue
+            score_delta *= -1
+        reward += w.score_change * score_delta
+
+        # Opponent ate our food (defending side food decreased)
+        # Prefer robust counting via asList() if available
+        prev_def_cnt = len(self.getFoodYouAreDefending(prev_gameState).asList())
+        curr_def_cnt = len(self.getFoodYouAreDefending(current_gameState).asList())
+        food_lost = prev_def_cnt - curr_def_cnt
+        if food_lost > 0:
+            reward += w.food_eaten_by_opponent * food_lost
+
+        # Opponent ate our capsule (defending side capsule decreased)
+        prev_def_cnt = len(self.getCapsulesYouAreDefending(prev_gameState))
+        curr_def_cnt = len(self.getCapsulesYouAreDefending(current_gameState))
+        capsule_lost = prev_def_cnt - curr_def_cnt
+        if capsule_lost > 0:
+            reward += w.capsule_eaten_by_opponent * capsule_lost
+
+        # Time step penalty
+        reward += w.time_penalty
+
+        # ----- Helper: opponent iteration
+        opp_indices = self.getOpponents(current_gameState)
+
+        # ----- 2) When we were an invader at t-1 (Pacman last turn)
+        if my_prev.isPacman:
+            # Ate food: carrying increased
+            if my_curr.numCarrying > my_prev.numCarrying:
+                reward += w.ate_food
+
+            # Ate a capsule: we stepped onto a capsule that disappeared
+            prev_caps = set(self.getCapsules(prev_gameState))
+            curr_caps = set(self.getCapsules(current_gameState))
+            eaten_capsules = prev_caps - curr_caps
+            if my_curr_pos in eaten_capsules:
+                reward += w.ate_capsule
+
+            # Ate scared ghost: credit only if (i) opp was scared, (ii) now unscared & respawned,
+            # and (iii) we were colliding with their previous position.
+            for oi in opp_indices:
+                opp_prev = prev_gameState.getAgentState(oi)
+                opp_curr = current_gameState.getAgentState(oi)
+                opp_prev_pos = opp_prev.getPosition()
+                opp_curr_pos = opp_curr.getPosition()
+
+                # must have been scared at t-1, and now not scared
+                if opp_prev.scaredTimer > 0 and opp_curr.scaredTimer == 0:
+                    # respawned now (at start). If out of FOV (None), still ok if we had collision evidence.
+                    respawned = (
+                        opp_curr_pos is not None and opp_curr_pos == opp_curr.start.pos
+                    ) or (opp_curr_pos is None)
+
+                    # collision evidence: we moved onto them OR were already on them
+                    collided = near(
+                        my_curr_pos, opp_prev_pos, COLLISION_TOLERANCE
+                    ) or near(my_prev_pos, opp_prev_pos, COLLISION_TOLERANCE)
+
+                    if respawned and collided:
+                        reward += w.ate_scared_ghost
+
+            # Transitioned out of Pacman at t (we are home or we died)
+            if not my_curr.isPacman:
+                # If we are at start now -> we died as invader
+                if my_curr_pos == my_curr.start.pos:
+                    reward += w.eaten_as_invader
+                else:
+                    # We crossed home and banked points (carrying dropped to 0 but no teleport)
+                    if my_prev.numCarrying > 0 and my_curr.numCarrying == 0:
+                        reward += w.scored_points * my_prev.numCarrying
+
+        # ----- 3) When we are a ghost at t (defending last turn or now)
+        else:
+            for oi in opp_indices:
+                opp_prev = prev_gameState.getAgentState(oi)
+                opp_curr = current_gameState.getAgentState(oi)
+                opp_prev_pos = opp_prev.getPosition()
+                opp_curr_pos = opp_curr.getPosition()
+
+                # Ate an invader: opp was Pacman, now not Pacman and respawned,
+                # and we had collision evidence.
+                if opp_prev.isPacman and not opp_curr.isPacman:
+                    respawned = (
+                        opp_curr_pos is not None and opp_curr_pos == opp_curr.start.pos
+                    ) or (opp_curr_pos is None)
+                    collided = near(
+                        my_curr_pos, opp_prev_pos, COLLISION_TOLERANCE
+                    ) or near(my_prev_pos, opp_prev_pos, COLLISION_TOLERANCE)
+                    if respawned and collided:
+                        reward += w.ate_invader
+
+            # Eaten as a scared ghost: we were scared at t-1, now unscared at t (reset),
+            # and teleported to start.
+            if (
+                my_prev.scaredTimer > 0
+                and my_curr.scaredTimer == 0
+                and my_curr_pos == my_curr.start.pos
+            ):
+                reward += w.eaten_as_scared_ghost
+
+        return reward
 
     def _get_cell_type(self, x, y, gameState):
         pos = (x, y)
@@ -309,7 +495,7 @@ class SmurphAgent(CaptureAgent):
         # Check if this team's beliefs are already initialized
         initialized = True
         for opp_idx in opponents:
-            if (team_key, opp_idx) not in self._opponent_beliefs:
+            if (team_key, opp_idx) not in SmurphAgent._opponent_beliefs:
                 initialized = False
                 break
 
@@ -321,7 +507,7 @@ class SmurphAgent(CaptureAgent):
 
         for opp_idx in opponents:
             # Create empty probability array
-            prob_array = [[0.0 for y in range(height)] for x in range(width)]
+            prob_array = [[0.0 for _ in range(height)] for _ in range(width)]
 
             # Get opponent's exact starting position
             opp_pos = gameState.getAgentState(opp_idx).start.pos
@@ -330,10 +516,10 @@ class SmurphAgent(CaptureAgent):
             x, y = int(opp_pos[0]), int(opp_pos[1])
             prob_array[x][y] = 1.0  # Certain they're at starting position
 
-            self._opponent_beliefs[(team_key, opp_idx)] = prob_array
+            SmurphAgent._opponent_beliefs[(team_key, opp_idx)] = prob_array
 
         # Initialize timestep tracker for this team
-        self._last_belief_update_timestep[team_key] = -1
+        SmurphAgent._last_belief_update_timestep[team_key] = -1
 
     def _update_opponent_belief(self, gameState: GameState, opponent_idx: int):
         """
@@ -354,7 +540,7 @@ class SmurphAgent(CaptureAgent):
         width, height = walls.width, walls.height
 
         current_timestep = len(self.observationHistory) - 1
-        last_update = self._last_belief_update_timestep.get(team_key, -1)
+        last_update = SmurphAgent._last_belief_update_timestep.get(team_key, -1)
         need_propagation = last_update < current_timestep
 
         # Check if opponent is visible
@@ -362,18 +548,18 @@ class SmurphAgent(CaptureAgent):
 
         if opp_pos is not None:
             # EXACT OBSERVATION - reset belief to certain position
-            prob_array = [[0.0 for y in range(height)] for x in range(width)]
+            prob_array = [[0.0 for _ in range(height)] for _ in range(width)]
             x, y = int(opp_pos[0]), int(opp_pos[1])
             prob_array[x][y] = 1.0
-            self._opponent_beliefs[(team_key, opponent_idx)] = prob_array
+            SmurphAgent._opponent_beliefs[(team_key, opponent_idx)] = prob_array
             return
 
         # PARTIAL OBSERVATION - update using noisy distance
-        old_beliefs = self._opponent_beliefs[(team_key, opponent_idx)]
+        old_beliefs = SmurphAgent._opponent_beliefs[(team_key, opponent_idx)]
 
         # Step 1: Propagate beliefs forward (account for movement) - ONLY ONCE PER TIMESTEP
         if need_propagation:
-            new_beliefs = [[0.0 for y in range(height)] for x in range(width)]
+            new_beliefs = [[0.0 for _ in range(height)] for _ in range(width)]
 
             for x in range(width):
                 for y in range(height):
@@ -386,7 +572,7 @@ class SmurphAgent(CaptureAgent):
                             new_beliefs[nx][ny] += prob_per_neighbor
 
             # Update the class variable with propagated beliefs
-            self._opponent_beliefs[(team_key, opponent_idx)] = new_beliefs
+            SmurphAgent._opponent_beliefs[(team_key, opponent_idx)] = new_beliefs
             old_beliefs = new_beliefs
 
         # Step 2: Bayesian update using noisy distance observation (each agent does this)
@@ -395,7 +581,7 @@ class SmurphAgent(CaptureAgent):
         assert noisy_distances is not None, "No noisy distances"
         noisy_dist = noisy_distances[opponent_idx]
 
-        updated_beliefs = [[0.0 for y in range(height)] for x in range(width)]
+        updated_beliefs = [[0.0 for _ in range(height)] for _ in range(width)]
         for x in range(width):
             for y in range(height):
                 if old_beliefs[x][y] > 0:
@@ -412,7 +598,7 @@ class SmurphAgent(CaptureAgent):
                 for y in range(height):
                     updated_beliefs[x][y] /= total_prob
 
-        self._opponent_beliefs[(team_key, opponent_idx)] = updated_beliefs
+        SmurphAgent._opponent_beliefs[(team_key, opponent_idx)] = updated_beliefs
 
     def _get_opponent_pos_dist(self, opponent_idx: int):
         """
@@ -426,7 +612,7 @@ class SmurphAgent(CaptureAgent):
             2D array where [x][y] = probability opponent is at (x, y)
         """
         team_key = self._get_team_key()
-        return self._opponent_beliefs.get((team_key, opponent_idx))
+        return SmurphAgent._opponent_beliefs.get((team_key, opponent_idx))
 
     def _get_graph_state(self, gameState: GameState):
         """
@@ -476,3 +662,17 @@ class SmurphAgent(CaptureAgent):
                 node_features[i][10] = opp2_belief[x][y]
 
         return node_features
+
+    def _get_weights_path(self):
+        return f"weights/{self.config.id}.pt"
+
+    def _upload_experiences(self, force=False):
+        if len(self.episode_memory) < 32 and not force:
+            return
+
+        file_path = f"experiences/{self.config.id}/{uuid.uuid4()}.pt"
+        torch.save(self.episode_memory, file_path)
+        self.episode_memory = []
+
+        # Try to update weights
+        self.policy_net.load_state_dict(torch.load(self._get_weights_path()))
