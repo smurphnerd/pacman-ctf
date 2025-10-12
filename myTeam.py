@@ -20,19 +20,16 @@
 # John DeNero (denero@cs.berkeley.edu) and Dan Klein (klein@cs.berkeley.edu).
 # For more info, see http://inst.eecs.berkeley.edu/~cs188/sp09/pacman.html
 
-from typing import List, Tuple, Dict, Literal
+from typing import List, Tuple, Dict, Literal, Optional
 from dataclasses import dataclass
 from enum import IntEnum
-from collections import deque, namedtuple
 
 from capture import COLLISION_TOLERANCE
 from captureAgents import CaptureAgent
-import distanceCalculator
-import random, time, util, sys, os, math, uuid
-from capture import GameState, noisyDistance
-from game import Directions, Actions, AgentState, Agent, Grid
-from util import nearestPoint, manhattanDistance
-import sys, os
+import random, math, uuid
+from capture import GameState
+from game import Directions, Actions
+from util import manhattanDistance
 
 import torch
 import torch.nn as nn
@@ -67,24 +64,28 @@ class SmurphGNN(nn.Module):
         return q_values
 
 
-Transition = namedtuple(
-    "Transition", ("state", "action", "reward", "next_state", "done")
-)
+class Transition:
+    """Experience tuple for replay buffer - plain class for better pickling"""
 
+    __slots__ = ("state", "action", "reward", "next_state", "done")
 
-class ReplayBuffer:
-    def __init__(self, capacity):
-        self.memory = deque([], maxlen=capacity)
+    def __init__(
+        self,
+        state: Data,
+        action: int,
+        reward: float,
+        next_state: Optional[Data],
+        done: bool,
+    ):
+        self.state = state
+        self.action = action
+        self.reward = reward
+        self.next_state = next_state
+        self.done = done
 
-    def push(self, *args):
-        """Save a transition"""
-        self.memory.append(Transition(*args))
-
-    def sample(self, batch_size):
-        return random.sample(self.memory, batch_size)
-
-    def __len__(self):
-        return len(self.memory)
+    def __iter__(self):
+        """Allow unpacking like a tuple"""
+        return iter((self.state, self.action, self.reward, self.next_state, self.done))
 
 
 class CellType(IntEnum):
@@ -99,8 +100,8 @@ class CellType(IntEnum):
 
 def createTeam(firstIndex, secondIndex, isRed, **kwargs):
     return [
-        SmurphAgent(firstIndex, isRed, **kwargs),
-        SmurphAgent(secondIndex, isRed, **kwargs),
+        SmurphAgent(firstIndex, **kwargs),
+        SmurphAgent(secondIndex, **kwargs),
     ]
 
 
@@ -108,11 +109,13 @@ def createTeam(firstIndex, secondIndex, isRed, **kwargs):
 class RewardWeights:
     score_change: float
     scored_points: float
-    eaten_as_invader: float
+    lost_points: float
     eaten_as_scared_ghost: float
     ate_food: float
     ate_capsule: float
-    ate_invader: float
+    teammate_scored_points: float
+    teammate_ate_food: float
+    saved_points: float
     ate_scared_ghost: float
     food_eaten_by_opponent: float
     capsule_eaten_by_opponent: float
@@ -121,12 +124,11 @@ class RewardWeights:
 
 @dataclass
 class SmurphAgentConfig:
-    id: int
     reward_weights: RewardWeights
     learning_rate: float
     gamma: float
-    epsilon_decay: float
-    epsilon: float
+    epsilon_start: float
+    epsilon_decay_rate: float
     epsilon_min: float
     games_played: int
 
@@ -151,18 +153,21 @@ class SmurphAgent(CaptureAgent):
 
     DIR_TO_IDX = {v: k for k, v in IDX_TO_DIR.items()}
 
-    def __init__(self, index, isRed, **kwargs):
+    def __init__(self, index, **kwargs):
         super().__init__(index)
 
-        if isRed:
-            self.config_path = kwargs.get("redCfg")
-        else:
-            self.config_path = kwargs.get("blueCfg")
+        self.id = kwargs.get("agentId")
 
         self.mode: Literal["inference", "training"] = kwargs.get("mode", "inference")
-        self.device = torch.device("cpu")
-        self.config: SmurphAgentConfig = torch.load(self.config_path)
-        assert isinstance(self.config, SmurphAgentConfig)
+        self.device = torch.device(
+            "cuda"
+            if torch.cuda.is_available()
+            else "mps"
+            if torch.backends.mps.is_available()
+            else "cpu"
+        )
+        self.config: SmurphAgentConfig = torch.load(self._get_config_path())
+        assert type(self.config).__name__ == "SmurphAgentConfig"
 
         self.policy_net = SmurphGNN(11, 5, hidden_channels=32)
         self.policy_net.load_state_dict(torch.load(self._get_weights_path()))
@@ -259,8 +264,8 @@ class SmurphAgent(CaptureAgent):
         legal_actions = gameState.getLegalActions(self.index)
 
         epsilon = self.config.epsilon_min + (
-            self.config.epsilon - self.config.epsilon_min
-        ) * math.exp(-1.0 * self.config.games_played / self.config.epsilon_decay)
+            self.config.epsilon_start - self.config.epsilon_min
+        ) * math.exp(-1.0 * self.config.games_played / self.config.epsilon_decay_rate)
         if random.random() < epsilon:
             action = random.choice(legal_actions)
         else:
@@ -318,6 +323,8 @@ class SmurphAgent(CaptureAgent):
         my_curr = current_gameState.getAgentState(self.index)
         my_prev_pos = my_prev.getPosition()
         my_curr_pos = my_curr.getPosition()
+        teammate_prev = prev_gameState.getAgentState(self._get_teammate_idx())
+        teammate_curr = current_gameState.getAgentState(self._get_teammate_idx())
 
         def manh(a, b):
             return None if (a is None or b is None) else manhattanDistance(a, b)
@@ -395,7 +402,8 @@ class SmurphAgent(CaptureAgent):
             if not my_curr.isPacman:
                 # If we are at start now -> we died as invader
                 if my_curr_pos == my_curr.start.pos:
-                    reward += w.eaten_as_invader
+                    lost_points = my_prev.numCarrying
+                    reward += w.lost_points * lost_points
                 else:
                     # We crossed home and banked points (carrying dropped to 0 but no teleport)
                     if my_prev.numCarrying > 0 and my_curr.numCarrying == 0:
@@ -419,7 +427,8 @@ class SmurphAgent(CaptureAgent):
                         my_curr_pos, opp_prev_pos, COLLISION_TOLERANCE
                     ) or near(my_prev_pos, opp_prev_pos, COLLISION_TOLERANCE)
                     if respawned and collided:
-                        reward += w.ate_invader
+                        saved_points = opp_prev.numCarrying
+                        reward += w.saved_points * saved_points
 
             # Eaten as a scared ghost: we were scared at t-1, now unscared at t (reset),
             # and teleported to start.
@@ -429,6 +438,21 @@ class SmurphAgent(CaptureAgent):
                 and my_curr_pos == my_curr.start.pos
             ):
                 reward += w.eaten_as_scared_ghost
+
+        # --- 4. Teammate reward ---
+        if teammate_prev.isPacman:
+            # Ate food: carrying increased
+            if teammate_curr.numCarrying > teammate_prev.numCarrying:
+                reward += w.teammate_ate_food
+
+            # Teammate scored points
+            if (
+                not teammate_curr.isPacman
+                and teammate_curr.numCarrying == 0
+                and teammate_prev.numCarrying > 0
+                and teammate_prev.getPosition() != teammate_curr.start.pos
+            ):
+                reward += w.teammate_scored_points * teammate_prev.numCarrying
 
         return reward
 
@@ -663,16 +687,32 @@ class SmurphAgent(CaptureAgent):
 
         return node_features
 
+    def _get_config_path(self):
+        return f"configs/{self.id}.pt"
+
     def _get_weights_path(self):
-        return f"weights/{self.config.id}.pt"
+        return f"weights/{self.id}.pt"
 
     def _upload_experiences(self, force=False):
         if len(self.episode_memory) < 32 and not force:
             return
 
-        file_path = f"experiences/{self.config.id}/{uuid.uuid4()}.pt"
-        torch.save(self.episode_memory, file_path)
+        file_path = f"experiences/{self.id}/{uuid.uuid4()}.pt"
+        print(
+            f"[Agent {self.id}] Uploading {len(self.episode_memory)} experiences to {file_path}"
+        )
+
+        # Convert Transitions to plain tuples to avoid pickle issues with dynamic module names
+        experiences_as_tuples = [
+            (t.state, t.action, t.reward, t.next_state, t.done)
+            for t in self.episode_memory
+        ]
+        torch.save(experiences_as_tuples, file_path)
         self.episode_memory = []
 
         # Try to update weights
-        self.policy_net.load_state_dict(torch.load(self._get_weights_path()))
+        try:
+            self.policy_net.load_state_dict(torch.load(self._get_weights_path()))
+            print(f"[Agent {self.id}] Reloaded updated weights")
+        except Exception as e:
+            print(f"[Agent {self.id}] Failed to reload weights: {e}")

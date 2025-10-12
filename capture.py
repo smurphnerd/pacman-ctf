@@ -810,6 +810,8 @@ def readCommand( argv ):
                     help='Catch exceptions and enforce time limits')
   parser.add_option('--frameTime', dest='frameTime', type='float',
                     help=default('Time to delay between frames; <0 means keyboard'), default=0.001)
+  parser.add_option('--results-out', dest='results_out', type='string',
+                    help=default('Path to write JSON results file'), default=None)
 
   options, otherjunk = parser.parse_args(argv)
   assert len(otherjunk) == 0, "Unrecognized options: " + str(otherjunk)
@@ -898,6 +900,7 @@ def readCommand( argv ):
   args['numTraining'] = options.numTraining
   args['record'] = options.record
   args['catchExceptions'] = options.catchExceptions
+  args['results_out'] = options.results_out
   return args
 
 def randomLayout(seed = None):
@@ -987,7 +990,7 @@ def replayGame( layout, agents, actions, display, length, redTeamName, blueTeamN
 
     display.finish()
 
-def runGames( layouts, agents, display, length, numGames, record, numTraining, redTeamName, blueTeamName, muteAgents=False, catchExceptions=False ):
+def runGames( layouts, agents, display, length, numGames, record, numTraining, redTeamName, blueTeamName, muteAgents=False, catchExceptions=False, results_out=None ):
 
   rules = CaptureRules()
   games = []
@@ -1031,6 +1034,31 @@ def runGames( layouts, agents, display, length, numGames, record, numTraining, r
     print('Red Win Rate:  %d/%d (%.2f)' % ([s > 0 for s in scores].count(True), len(scores), redWinRate))
     print('Blue Win Rate: %d/%d (%.2f)' % ([s < 0 for s in scores].count(True), len(scores), blueWinRate))
     print('Record:       ', ', '.join([('Blue', 'Tie', 'Red')[max(0, min(2, 1 + s))] for s in scores]))
+
+  # Write JSON results if requested
+  if results_out is not None:
+    import json
+    scores = [game.state.data.score for game in games]
+    red_wins = [s > 0 for s in scores].count(True)
+    blue_wins = [s < 0 for s in scores].count(True)
+    ties = [s == 0 for s in scores].count(True)
+    results = {
+      "total_games": len(scores),
+      "scores": scores,
+      "average_score": sum(scores) / float(len(scores)) if len(scores) > 0 else 0,
+      "red_wins": red_wins,
+      "blue_wins": blue_wins,
+      "ties": ties,
+      "red_win_rate": red_wins / float(len(scores)) if len(scores) > 0 else 0,
+      "blue_win_rate": blue_wins / float(len(scores)) if len(scores) > 0 else 0,
+      "results": [('Blue', 'Tie', 'Red')[max(0, min(2, 1 + s))] for s in scores],
+      "red_team": redTeamName,
+      "blue_team": blueTeamName
+    }
+    with open(results_out, 'w') as f:
+      json.dump(results, f, indent=2)
+    print(f'Results written to {results_out}')
+
   return games
 
 def save_score(game):
