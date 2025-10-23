@@ -16,6 +16,9 @@ PBT_CFG = {
     "elo_K": 32,
     "sigma_winprob": 1 / 6,
     "seed": 42,
+    "layout": "defaultCapture",  # Options: testCapture (smallest), tinyCapture, fastCapture, mediumCapture, defaultCapture
+    "top_frac": 0.2,      # Top 20% of agents are considered "elite"
+    "bottom_frac": 0.2,   # Bottom 20% get replaced by mutated copies of elite
 }
 
 
@@ -42,6 +45,10 @@ DEFAULT_REWARD_WEIGHTS = RewardWeights(
     food_eaten_by_opponent=signed_logu(-1),
     capsule_eaten_by_opponent=signed_logu(-1),
     time_penalty=signed_logu(-1),
+    # Dense shaping rewards (set to 0 to disable)
+    distance_to_food=0.01,  # Small reward for getting closer to food
+    crossed_to_enemy=1.0,  # Reward for entering enemy territory
+    returned_home=0.5,  # Reward for returning to defend
 )
 DEFAULT_CONFIG = SmurphAgentConfig(
     reward_weights=DEFAULT_REWARD_WEIGHTS,
@@ -169,8 +176,8 @@ def run_game_homogeneous(A_id, B_id, num_games=1, layout=None):
 
         if result.returncode != 0:
             print(f"  [Game] Non-zero exit code: {result.returncode}")
-            print(f"  [Game] STDOUT: {result.stdout[:500]}")
-            print(f"  [Game] STDERR: {result.stderr[:500]}")
+            print(f"  [Game] STDOUT:\n{result.stdout}")
+            print(f"  [Game] STDERR:\n{result.stderr}")
             data = None
         else:
             print(f"  [Game] Completed successfully, reading results...")
@@ -263,6 +270,9 @@ def init_population(default_cfg: SmurphAgentConfig, reset=False) -> List[int]:
             food_eaten_by_opponent=jitter(rw.food_eaten_by_opponent),
             capsule_eaten_by_opponent=jitter(rw.capsule_eaten_by_opponent),
             time_penalty=rw.time_penalty,  # often fixed
+            distance_to_food=rw.distance_to_food,
+            crossed_to_enemy=rw.crossed_to_enemy,
+            returned_home=rw.returned_home,
         )
         cfg = replace(cfg, reward_weights=rw)
         torch.save(cfg, cfg_path)
@@ -300,6 +310,9 @@ def mutate_config(cfg: SmurphAgentConfig):
         food_eaten_by_opponent=maybe_scale(rw.food_eaten_by_opponent),
         capsule_eaten_by_opponent=maybe_scale(rw.capsule_eaten_by_opponent),
         time_penalty=rw.time_penalty,
+        distance_to_food=maybe_scale(rw.distance_to_food),
+        crossed_to_enemy=maybe_scale(rw.crossed_to_enemy),
+        returned_home=maybe_scale(rw.returned_home),
     )
     cfg = replace(
         cfg,
@@ -387,6 +400,7 @@ def population_based_training(default_cfg: SmurphAgentConfig, reset=False):
                     red_id,
                     blue_id,
                     num_games=PBT_CFG["games_per_match"],
+                    layout=PBT_CFG.get("layout"),
                 )
                 futures[future] = (red_id, blue_id)
 
@@ -481,4 +495,17 @@ if __name__ == "__main__":
 
     # Pass --reset flag to start from scratch
     reset = "--reset" in sys.argv
+
+    # Pass --reset-epsilon flag to reset games_played for all agents (resets epsilon)
+    reset_epsilon = "--reset-epsilon" in sys.argv
+    if reset_epsilon:
+        print("[PBT] Resetting games_played for all agents to restart epsilon decay...")
+        for i in range(PBT_CFG["population_size"]):
+            cfg_path = f"configs/{i}.pt"
+            if os.path.exists(cfg_path):
+                cfg = torch.load(cfg_path)
+                cfg.games_played = 0
+                torch.save(cfg, cfg_path)
+                print(f"  Reset games_played for agent {i}")
+
     population_based_training(DEFAULT_CONFIG, reset=reset)
