@@ -40,6 +40,8 @@ from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 
+torch.set_num_threads(1)
+
 
 class SmurphCNN(nn.Module):
     def __init__(self, num_input_channels: int, num_actions: int):
