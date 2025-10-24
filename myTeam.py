@@ -78,14 +78,11 @@ class SmurphCNN(nn.Module):
         x = F.relu(self.conv4(x))
         x = self.pool2(x)  # x shape: (batch, 256, H/4, W/4)
 
-        # 2. Extract location-specific features for each agent in the batch
-        # We need to scale the agent's coordinates to match the pooled feature map size.
-        # Note: PyTorch expects (y, x) for grid indexing.
         scaled_pos = pos // 4
 
         # Create a list of feature vectors for each item in the batch
         batch_indices = torch.arange(x.size(0), device=x.device)
-        agent_features = x[batch_indices, :, scaled_pos[:, 1], scaled_pos[:, 0]]
+        agent_features = x[batch_indices, :, scaled_pos[:, 0], scaled_pos[:, 1]]
         # agent_features shape: (batch_size, 256)
 
         # 3. Pass the extracted features through the policy head
@@ -173,7 +170,12 @@ class SmurphAgent(CaptureAgent):
         self.nn.to(self.device)
 
         self.medChooseActionTimes = []
-        self.jumboChooseActionTimes = []
+        self.medChooseActionTimes2 = []
+        self.medChooseActionTimes4 = []
+        self.medChooseActionTimes8 = []
+        self.medChooseActionTimes16 = []
+        self.medChooseActionTimes32 = []
+        self.medChooseActionTimes64 = []
 
         if self.mode == "training":
             self.episode_memory: List[Transition] = []
@@ -214,17 +216,42 @@ class SmurphAgent(CaptureAgent):
         Example implementation showing how to use belief tracking.
         """
         randXMed = torch.rand(1, 11, 25, 25, device=self.device)
-        randXLarge = torch.rand(1, 11, 50, 50, device=self.device)
+        randXMed2 = torch.rand(2, 11, 25, 25, device=self.device)
+        randXMed4 = torch.rand(4, 11, 25, 25, device=self.device)
+        randXMed8 = torch.rand(8, 11, 25, 25, device=self.device)
+        randXMed16 = torch.rand(16, 11, 25, 25, device=self.device)
+        randXMed32 = torch.rand(32, 11, 25, 25, device=self.device)
+        randXMed64 = torch.rand(64, 11, 25, 25, device=self.device)
         randPos = torch.tensor([[1, 1]], device=self.device)
 
         medStart = time.time()
         self.nn(randXMed, randPos)
         medEnd = time.time()
-        jumboStart = time.time()
-        self.nn(randXLarge, randPos)
-        jumboEnd = time.time()
+        medStart2 = time.time()
+        self.nn(randXMed2, randPos)
+        medEnd2 = time.time()
+        medStart4 = time.time()
+        self.nn(randXMed4, randPos)
+        medEnd4 = time.time()
+        medStart8 = time.time()
+        self.nn(randXMed8, randPos)
+        medEnd8 = time.time()
+        medStart16 = time.time()
+        self.nn(randXMed16, randPos)
+        medEnd16 = time.time()
+        medStart32 = time.time()
+        self.nn(randXMed32, randPos)
+        medEnd32 = time.time()
+        medStart64 = time.time()
+        self.nn(randXMed64, randPos)
+        medEnd64 = time.time()
         self.medChooseActionTimes.append(medEnd - medStart)
-        self.jumboChooseActionTimes.append(jumboEnd - jumboStart)
+        self.medChooseActionTimes2.append(medEnd2 - medStart2)
+        self.medChooseActionTimes4.append(medEnd4 - medStart4)
+        self.medChooseActionTimes8.append(medEnd8 - medStart8)
+        self.medChooseActionTimes16.append(medEnd16 - medStart16)
+        self.medChooseActionTimes32.append(medEnd32 - medStart32)
+        self.medChooseActionTimes64.append(medEnd64 - medStart64)
 
         legal_actions = gameState.getLegalActions(self.index)
         return random.choice(legal_actions)
@@ -232,7 +259,7 @@ class SmurphAgent(CaptureAgent):
     def final(self, gameState: GameState):
         """This is called at the end of a game to trigger training."""
         raise Exception(
-            f"Med: {np.array(self.medChooseActionTimes).mean()}, Jumbo: {np.array(self.jumboChooseActionTimes).mean()}"
+            f"Med: {np.array(self.medChooseActionTimes).mean()}, Med2: {np.array(self.medChooseActionTimes2).mean()}, Med4: {np.array(self.medChooseActionTimes4).mean()}, Med8: {np.array(self.medChooseActionTimes8).mean()}, Med16: {np.array(self.medChooseActionTimes16).mean()}, Med32: {np.array(self.medChooseActionTimes32).mean()}, Med64: {np.array(self.medChooseActionTimes64).mean()}"
         )
 
     def _get_cell_type(self, x, y, gameState):
