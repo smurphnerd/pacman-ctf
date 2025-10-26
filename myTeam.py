@@ -40,14 +40,23 @@ from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 
-torch.set_num_threads(1)
+import belief_tracking
+
+
+# torch.set_num_threads(1)
 
 
 class SmurphCNN(nn.Module):
-    def __init__(self, num_input_channels: int, num_actions: int):
+    def __init__(
+        self,
+        num_actions: int = 5,
+        num_spatial_features: int = 11,
+        num_scalar_features: int = 14,
+    ):
         super(SmurphCNN, self).__init__()
 
-        self.conv1 = nn.Conv2d(num_input_channels, 64, kernel_size=3, padding=1)
+        # Convolutional layers (process spatial input)
+        self.conv1 = nn.Conv2d(num_spatial_features, 64, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
         self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
 
@@ -55,43 +64,50 @@ class SmurphCNN(nn.Module):
         self.conv4 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
         self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        feature_vector_size = 256
+        self.global_max_pool = nn.AdaptiveMaxPool2d((1, 1))
 
-        # --- Policy Head (Decides which action to take) ---
-        self.policy_fc1 = nn.Linear(feature_vector_size, 128)
+        # Combined features: 256 (spatial) + num_scalar_features (non-spatial)
+        combined_dim = 256 + num_scalar_features
+
+        # Policy head
+        self.policy_fc1 = nn.Linear(combined_dim, 128)
         self.policy_output = nn.Linear(128, num_actions)
 
-        # --- Value Head (Estimates the chance of winning) ---
-        self.value_fc1 = nn.Linear(feature_vector_size, 128)
+        # Value head
+        self.value_fc1 = nn.Linear(combined_dim, 128)
         self.value_output = nn.Linear(128, 1)
 
     def forward(
         self,
-        x: Tensor,  # "batch", "num_channels", "width", "height"
-        pos: Tensor,  # "batch", 2
+        spatial_input: Tensor,  # "batch", "num_channels", "width", "height"
+        scalar_input: Tensor,  # "batch", "num_scalar_features"
     ) -> Tuple[Tensor, Tensor]:  # "batch", "num_actions"
-        x = F.relu(self.conv1(x))
+        # Process spatial features through CNN
+        x = F.relu(self.conv1(spatial_input))
         x = F.relu(self.conv2(x))
-        x = self.pool1(x)  # x shape: (batch, 128, H/2, W/2)
+        x = self.pool1(x)
 
         x = F.relu(self.conv3(x))
         x = F.relu(self.conv4(x))
-        x = self.pool2(x)  # x shape: (batch, 256, H/4, W/4)
+        x = self.pool2(x)
 
-        scaled_pos = pos // 4
+        # Global pooling → [batch, 256]
+        spatial_features = self.global_max_pool(x).squeeze()
 
-        # Create a list of feature vectors for each item in the batch
-        batch_indices = torch.arange(x.size(0), device=x.device)
-        agent_features = x[batch_indices, :, scaled_pos[:, 0], scaled_pos[:, 1]]
-        # agent_features shape: (batch_size, 256)
+        # Handle batch dimension edge cases
+        if spatial_features.dim() == 1:
+            spatial_features = spatial_features.unsqueeze(0)
 
-        # 3. Pass the extracted features through the policy head
-        p = F.relu(self.policy_fc1(agent_features))
-        policy_logits = self.policy_output(p)  # Raw scores, apply softmax later
+        # Concatenate spatial and scalar features
+        combined = torch.cat([spatial_features, scalar_input], dim=1)
 
-        # 4. Pass the extracted features through the value head
-        v = F.relu(self.value_fc1(agent_features))
-        value_estimate = torch.tanh(self.value_output(v))  # Output between -1 and 1
+        # Policy head
+        p = F.relu(self.policy_fc1(combined))
+        policy_logits = self.policy_output(p)
+
+        # Value head
+        v = F.relu(self.value_fc1(combined))
+        value_estimate = torch.tanh(self.value_output(v))
 
         return policy_logits, value_estimate
 
@@ -127,22 +143,14 @@ class CellType(IntEnum):
 
 
 def createTeam(firstIndex, secondIndex, isRed, **kwargs):
+    shared_opponent_pos_dist = {}
     return [
-        SmurphAgent(firstIndex, **kwargs),
-        SmurphAgent(secondIndex, **kwargs),
+        SmurphAgent(firstIndex, shared_opponent_pos_dist, **kwargs),
+        SmurphAgent(secondIndex, shared_opponent_pos_dist, **kwargs),
     ]
 
 
 class SmurphAgent(CaptureAgent):
-    # Shared belief distributions for opponent positions (per team)
-    # Dict mapping (team_color, opponent_idx) -> 2D probability array
-    # team_color is "red" or "blue"
-    _opponent_beliefs: Dict[Tuple[str, int], List[List[float]]] = {}
-
-    # Track the last timestep when beliefs were updated per team (to avoid double-updating per timestep)
-    # Dict mapping team_color -> last_timestep
-    _last_belief_update_timestep: Dict[str, int] = {}
-
     IDX_TO_DIR = {
         0: Directions.NORTH,
         1: Directions.SOUTH,
@@ -153,129 +161,212 @@ class SmurphAgent(CaptureAgent):
 
     DIR_TO_IDX = {v: k for k, v in IDX_TO_DIR.items()}
 
-    def __init__(self, index, **kwargs):
+    def __init__(self, index, shared_opponent_pos_dist, **kwargs):
         super().__init__(index)
 
         self.mode: Literal["inference", "training"] = kwargs.get("mode", "inference")
-        # self.device = torch.device(
-        #     "cuda"
-        #     if torch.cuda.is_available()
-        #     else "mps"
-        #     if torch.backends.mps.is_available()
-        #     else "cpu"
-        # )
-        self.device = torch.device("cpu")
+        self.device = torch.device(
+            "cuda"
+            if torch.cuda.is_available()
+            else "mps"
+            if torch.backends.mps.is_available()
+            else "cpu"
+        )
+        self.shared_opponent_pos_dist = shared_opponent_pos_dist
 
-        self.nn = SmurphCNN(11, 5)
-        self.nn.to(self.device)
-
-        self.medChooseActionTimes = []
-        self.medChooseActionTimes2 = []
-        self.medChooseActionTimes4 = []
-        self.medChooseActionTimes8 = []
-        self.medChooseActionTimes16 = []
-        self.medChooseActionTimes32 = []
-        self.medChooseActionTimes64 = []
-
-        if self.mode == "training":
-            self.episode_memory: List[Transition] = []
-            self.previous_action_idx = None
-            self.previous_state_graph = None
+        self.network = SmurphCNN(5)
+        self.network.to(self.device)
 
     def registerInitialState(self, gameState: GameState):
+        """Called once at the start of the game to perform expensive precomputation."""
         CaptureAgent.registerInitialState(self, gameState)
 
-        self.graph_nodes = []
-        self.graph_edge_index = []
-        self.node_map = {}  # Maps (x,y) to node index
+        self.max_food = len(self.getFood(gameState).asList())
+        self.max_food_defending = len(self.getFoodYouAreDefending(gameState).asList())
+        self.max_score = max(self.max_food, self.max_food_defending)
 
-        walls = gameState.getWalls()
-        width, height = walls.width, walls.height
+        self.width, self.height = (
+            gameState.data.layout.width,
+            gameState.data.layout.height,
+        )
+        self.time_limit = gameState.data.timeleft
 
-        # Create a node for each non-wall cell
-        node_idx = 0
-        for x in range(width):
-            for y in range(height):
-                if not walls[x][y]:
-                    self.graph_nodes.append((x, y))
-                    self.node_map[(x, y)] = node_idx
-                    node_idx += 1
-
-        for current_node_idx, (x, y) in enumerate(self.graph_nodes):
-            # Check the four cardinal directions for neighbors
-            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-                neighbor_pos = (x + dx, y + dy)
-
-                # If the neighbor is a valid, walkable node, add an edge
-                if neighbor_pos in self.node_map:
-                    neighbor_node_idx = self.node_map[neighbor_pos]
-                    self.graph_edge_index.append([current_node_idx, neighbor_node_idx])
+        # Initialize shared beliefs using centralized function
+        # Only initialize once per team (both teammates share the same dict)
+        if not self.shared_opponent_pos_dist:
+            beliefs = belief_tracking.initialize_beliefs(gameState)
+            # Only store beliefs for our opponents
+            opponents = self.getOpponents(gameState)
+            for opp_idx in opponents:
+                self.shared_opponent_pos_dist[opp_idx] = beliefs[opp_idx]
 
     def chooseAction(self, gameState: GameState):
         """
         Example implementation showing how to use belief tracking.
         """
-        randXMed = torch.rand(1, 11, 25, 25, device=self.device)
-        randXMed2 = torch.rand(2, 11, 25, 25, device=self.device)
-        randXMed4 = torch.rand(4, 11, 25, 25, device=self.device)
-        randXMed8 = torch.rand(8, 11, 25, 25, device=self.device)
-        randXMed16 = torch.rand(16, 11, 25, 25, device=self.device)
-        randXMed32 = torch.rand(32, 11, 25, 25, device=self.device)
-        randXMed64 = torch.rand(64, 11, 25, 25, device=self.device)
-        randPos = torch.tensor([[1, 1]], device=self.device)
+        # Update beliefs using centralized function
+        updated_beliefs = belief_tracking.update_all_beliefs(
+            self.shared_opponent_pos_dist,
+            gameState,
+            self.index,
+        )
 
-        medStart = time.time()
-        self.nn(randXMed, randPos)
-        medEnd = time.time()
-        medStart2 = time.time()
-        self.nn(randXMed2, randPos)
-        medEnd2 = time.time()
-        medStart4 = time.time()
-        self.nn(randXMed4, randPos)
-        medEnd4 = time.time()
-        medStart8 = time.time()
-        self.nn(randXMed8, randPos)
-        medEnd8 = time.time()
-        medStart16 = time.time()
-        self.nn(randXMed16, randPos)
-        medEnd16 = time.time()
-        medStart32 = time.time()
-        self.nn(randXMed32, randPos)
-        medEnd32 = time.time()
-        medStart64 = time.time()
-        self.nn(randXMed64, randPos)
-        medEnd64 = time.time()
-        self.medChooseActionTimes.append(medEnd - medStart)
-        self.medChooseActionTimes2.append(medEnd2 - medStart2)
-        self.medChooseActionTimes4.append(medEnd4 - medStart4)
-        self.medChooseActionTimes8.append(medEnd8 - medStart8)
-        self.medChooseActionTimes16.append(medEnd16 - medStart16)
-        self.medChooseActionTimes32.append(medEnd32 - medStart32)
-        self.medChooseActionTimes64.append(medEnd64 - medStart64)
+        # Update the shared dict (teammates will see updated beliefs)
+        opponents = self.getOpponents(gameState)
+        for opp_idx in opponents:
+            self.shared_opponent_pos_dist[opp_idx] = updated_beliefs[opp_idx]
+
+        # Now you can get the state and use it
+        # spatial_tensor, scalar_tensor = self._get_state(gameState)
+        # ... use neural network to choose action ...
 
         legal_actions = gameState.getLegalActions(self.index)
         return random.choice(legal_actions)
 
     def final(self, gameState: GameState):
         """This is called at the end of a game to trigger training."""
-        raise Exception(
-            f"Med: {np.array(self.medChooseActionTimes).mean()}, Med2: {np.array(self.medChooseActionTimes2).mean()}, Med4: {np.array(self.medChooseActionTimes4).mean()}, Med8: {np.array(self.medChooseActionTimes8).mean()}, Med16: {np.array(self.medChooseActionTimes16).mean()}, Med32: {np.array(self.medChooseActionTimes32).mean()}, Med64: {np.array(self.medChooseActionTimes64).mean()}"
+        pass
+
+    def _get_state(self, gameState: GameState) -> Tuple[Tensor, Tensor]:
+        """
+        Creates tensor representations of the game state for CNN input.
+
+        Returns:
+            spatial_state: [11, width, height] tensor with spatial features
+                - Channels 0-6: One-hot encoding for CellType
+                - Channel 7: Opponent 1 belief distribution
+                - Channel 8: Opponent 2 belief distribution
+                - Channel 9: Teammate's position
+                - Channel 10: My agent's position
+            scalar_state: [14] tensor with non-spatial features
+                - Scared timers (4 values)
+                - Food carrying (4 values)
+                - Pacman status (4 values)
+                - Time remaining (1 value)
+                - Score from my perspective (1 value)
+        """
+        width, height = gameState.data.layout.width, gameState.data.layout.height
+
+        # Initialize 11-channel tensor (all zeros)
+        num_channels = 11
+        state_tensor = np.zeros((num_channels, width, height), dtype=np.float32)
+
+        # Determine if we need to flip (Blue team's perspective)
+        # For AlphaZero self-play, Blue agents see flipped board as if they were Red
+        is_blue = self.index in [1, 3]
+
+        # Get agent and opponent indices
+        my_idx = self.index
+        teammate_idx = self._get_teammate_idx()
+        opponents = self.getOpponents(gameState)
+        opp1_idx, opp2_idx = opponents[0], opponents[1]
+
+        # Get opponent belief distributions
+        opp1_belief = self.shared_opponent_pos_dist.get(opp1_idx)
+        assert (
+            opp1_belief is not None
+        ), "_get_state: Opponent 1 belief distribution should not be None"
+        opp2_belief = self.shared_opponent_pos_dist.get(opp2_idx)
+        assert (
+            opp2_belief is not None
+        ), "_get_state: Opponent 2 belief distribution should not be None"
+
+        # Get agent positions
+        my_pos = gameState.getAgentPosition(my_idx)
+        teammate_pos = gameState.getAgentPosition(teammate_idx)
+        assert (
+            teammate_pos is not None
+        ), "_get_state: Teammate position should not be None"
+
+        # Cache food/capsules/walls once before the loops (MAJOR OPTIMIZATION)
+        walls = gameState.getWalls()
+        enemy_food = self.getFood(gameState)
+        ally_food = self.getFoodYouAreDefending(gameState)
+        enemy_capsules = self.getCapsules(gameState)
+        ally_capsules = self.getCapsulesYouAreDefending(gameState)
+
+        # Fill in the tensor for each position
+        # Iterate over observation coordinates, map to actual board positions
+        for x in range(width):
+            for y in range(height):
+                # Get actual position (flip if Blue)
+                actual_x = self.transform_pos((x, y))[0]
+
+                # --- Channels 0-6: One-hot encoding for CellType ---
+                cell_type = self._get_cell_type(
+                    (actual_x, y), walls, enemy_food, ally_food, enemy_capsules, ally_capsules
+                )
+                state_tensor[cell_type.value, x, y] = 1.0
+
+                # --- Channel 7: Opponent 1 belief distribution ---
+                if opp1_belief:
+                    state_tensor[7, x, y] = opp1_belief[actual_x][y]
+
+                # --- Channel 8: Opponent 2 belief distribution ---
+                if opp2_belief:
+                    state_tensor[8, x, y] = opp2_belief[actual_x][y]
+
+        # --- Channel 9: Teammate's position ---
+        teammate_x, teammate_y = self.transform_pos(teammate_pos)
+        state_tensor[9, teammate_x, teammate_y] = 1.0
+
+        # --- Channel 10: My agent's position ---
+        my_x, my_y = self.transform_pos(my_pos)
+        state_tensor[10, my_x, my_y] = 1.0
+
+        # ============ Scalar Features ============
+
+        # Get agent states
+        my_state = gameState.getAgentState(my_idx)
+        teammate_state = gameState.getAgentState(teammate_idx)
+        opp1_state = gameState.getAgentState(opp1_idx)
+        opp2_state = gameState.getAgentState(opp2_idx)
+
+        # Build scalar features (normalized to [0, 1] or [-1, 1])
+        scalar_features = [
+            # Scared timers (0-40) → normalize to [0, 1]
+            my_state.scaredTimer / 40.0,
+            teammate_state.scaredTimer / 40.0,
+            opp1_state.scaredTimer / 40.0,
+            opp2_state.scaredTimer / 40.0,
+            # Food carrying (0 to max_food) → normalize to [0, 1]
+            my_state.numCarrying / float(self.max_food),
+            teammate_state.numCarrying / float(self.max_food),
+            opp1_state.numCarrying / float(self.max_food_defending),
+            opp2_state.numCarrying / float(self.max_food_defending),
+            # Pacman status (0 or 1)
+            float(my_state.isPacman),
+            float(teammate_state.isPacman),
+            float(opp1_state.isPacman),
+            float(opp2_state.isPacman),
+            # Time remaining (0-1200) → normalize to [0, 1]
+            gameState.data.timeleft / self.time_limit,
+            # Score (from my perspective, -max_score to +max_score) → normalize to [-1, 1]
+            gameState.getScore() / float(self.max_score) * (1.0 if self.red else -1.0),
+        ]
+
+        spatial_tensor = torch.tensor(
+            state_tensor, dtype=torch.float32, device=self.device
+        )
+        scalar_tensor = torch.tensor(
+            scalar_features, dtype=torch.float32, device=self.device
         )
 
-    def _get_cell_type(self, x, y, gameState):
-        pos = (x, y)
+        return spatial_tensor, scalar_tensor
 
-        walls = gameState.getWalls()
+    def _get_cell_type(
+        self,
+        pos: Tuple[int, int],
+        walls,
+        enemy_food,
+        ally_food,
+        enemy_capsules,
+        ally_capsules,
+    ):
+        x, y = pos
+
         if x < 0 or y < 0 or x >= walls.width or y >= walls.height or walls[x][y]:
             return CellType.WALL
-
-        # Get food for both teams
-        enemy_food = self.getFood(gameState)  # Food we can eat
-        ally_food = self.getFoodYouAreDefending(gameState)  # Food we defend
-
-        # Get capsules for both teams
-        enemy_capsules = self.getCapsules(gameState)  # Capsules we can eat
-        ally_capsules = self.getCapsulesYouAreDefending(gameState)  # Capsules we defend
 
         # Check capsules (territory-specific)
         if pos in ally_capsules:
@@ -295,7 +386,7 @@ class SmurphAgent(CaptureAgent):
             midpoint = width // 2
 
             # Red team controls left half (x < midpoint)
-            if gameState.isOnRedTeam(self.index):
+            if self.red:
                 if x < midpoint:
                     return CellType.EMPTY_ALLY_TERRITORY
                 else:
@@ -311,184 +402,8 @@ class SmurphAgent(CaptureAgent):
     def _get_teammate_idx(self):
         return (self.index + 2) % 4
 
-    def _get_team_key(self):
-        """Returns 'red' or 'blue' for this agent's team."""
-        return "red" if self.red else "blue"
+    def transform_pos(self, pos) -> Tuple[int, int]:
+        if self.red:
+            return pos
 
-    def _initialize_beliefs_if_needed(self, gameState: GameState):
-        """
-        Initialize opponent beliefs on first call with exact starting positions.
-        """
-        team_key = self._get_team_key()
-        opponents = self.getOpponents(gameState)
-
-        # Check if this team's beliefs are already initialized
-        initialized = True
-        for opp_idx in opponents:
-            if (team_key, opp_idx) not in SmurphAgent._opponent_beliefs:
-                initialized = False
-                break
-
-        if initialized:
-            return
-
-        walls = gameState.getWalls()
-        width, height = walls.width, walls.height
-
-        for opp_idx in opponents:
-            # Create empty probability array
-            prob_array = [[0.0 for _ in range(height)] for _ in range(width)]
-
-            # Get opponent's exact starting position
-            opp_pos = gameState.getAgentState(opp_idx).start.pos
-            assert opp_pos is not None, "Start position is None"
-
-            x, y = int(opp_pos[0]), int(opp_pos[1])
-            prob_array[x][y] = 1.0  # Certain they're at starting position
-
-            SmurphAgent._opponent_beliefs[(team_key, opp_idx)] = prob_array
-
-        # Initialize timestep tracker for this team
-        SmurphAgent._last_belief_update_timestep[team_key] = -1
-
-    def _update_opponent_belief(self, gameState: GameState, opponent_idx: int):
-        """
-        Updates belief distribution for one opponent based on current observations.
-        This should be called each turn to incrementally update beliefs.
-
-        Steps:
-        1. If opponent is visible, reset belief to exact position
-        2. Otherwise, propagate belief forward (account for possible movement) - ONCE per timestep
-        3. Apply Bayesian update using noisy distance observation - for each agent
-
-        Args:
-            gameState: Current game state
-            opponent_idx: Index of opponent to update
-        """
-        team_key = self._get_team_key()
-        walls = gameState.getWalls()
-        width, height = walls.width, walls.height
-
-        current_timestep = len(self.observationHistory) - 1
-        last_update = SmurphAgent._last_belief_update_timestep.get(team_key, -1)
-        need_propagation = last_update < current_timestep
-
-        # Check if opponent is visible
-        opp_pos = gameState.getAgentState(opponent_idx).getPosition()
-
-        if opp_pos is not None:
-            # EXACT OBSERVATION - reset belief to certain position
-            prob_array = [[0.0 for _ in range(height)] for _ in range(width)]
-            x, y = int(opp_pos[0]), int(opp_pos[1])
-            prob_array[x][y] = 1.0
-            SmurphAgent._opponent_beliefs[(team_key, opponent_idx)] = prob_array
-            return
-
-        # PARTIAL OBSERVATION - update using noisy distance
-        old_beliefs = SmurphAgent._opponent_beliefs[(team_key, opponent_idx)]
-
-        # Step 1: Propagate beliefs forward (account for movement) - ONLY ONCE PER TIMESTEP
-        if need_propagation:
-            new_beliefs = [[0.0 for _ in range(height)] for _ in range(width)]
-
-            for x in range(width):
-                for y in range(height):
-                    if old_beliefs[x][y] > 0:
-                        # From position (x,y), distribute probability to reachable neighbors
-                        neighbors = Actions.getLegalNeighbors((x, y), walls)
-                        prob_per_neighbor = old_beliefs[x][y] / len(neighbors)
-
-                        for nx, ny in neighbors:
-                            new_beliefs[nx][ny] += prob_per_neighbor
-
-            # Update the class variable with propagated beliefs
-            SmurphAgent._opponent_beliefs[(team_key, opponent_idx)] = new_beliefs
-            old_beliefs = new_beliefs
-
-        # Step 2: Bayesian update using noisy distance observation (each agent does this)
-        my_pos = gameState.getAgentPosition(self.index)
-        noisy_distances = gameState.getAgentDistances()
-        assert noisy_distances is not None, "No noisy distances"
-        noisy_dist = noisy_distances[opponent_idx]
-
-        updated_beliefs = [[0.0 for _ in range(height)] for _ in range(width)]
-        for x in range(width):
-            for y in range(height):
-                if old_beliefs[x][y] > 0:
-                    # P(pos | observation) ∝ P(observation | pos) * P(pos)
-                    prior = old_beliefs[x][y]
-                    true_dist = self.getMazeDistance(my_pos, (x, y))
-                    likelihood = gameState.getDistanceProb(true_dist, noisy_dist)
-                    updated_beliefs[x][y] = prior * likelihood
-
-        # Step 3: Normalize
-        total_prob = sum(sum(row) for row in updated_beliefs)
-        if total_prob > 0:
-            for x in range(width):
-                for y in range(height):
-                    updated_beliefs[x][y] /= total_prob
-
-        SmurphAgent._opponent_beliefs[(team_key, opponent_idx)] = updated_beliefs
-
-    def _get_opponent_pos_dist(self, opponent_idx: int):
-        """
-        Returns the current belief distribution for an opponent.
-        Call _update_opponent_belief() first to ensure beliefs are current.
-
-        Args:
-            opponent_idx: Index of opponent agent
-
-        Returns:
-            2D array where [x][y] = probability opponent is at (x, y)
-        """
-        team_key = self._get_team_key()
-        return SmurphAgent._opponent_beliefs.get((team_key, opponent_idx))
-
-    def _get_graph_state(self, gameState: GameState):
-        """
-        Creates the node feature matrix for the current gameState.
-        """
-        num_nodes = len(self.graph_nodes)
-
-        # Define the size of your feature vector.
-        # One-hot CellType (7) + my_agent (1) + teammate (1) + opp1_prob (1) + opp2_prob (1) = 11 features
-        num_features = 7 + 4
-        node_features = [[0.0] * num_features for _ in range(num_nodes)]
-
-        # Get agent and opponent indices
-        my_idx = self.index
-        teammate_idx = self._get_teammate_idx()
-        opponents = self.getOpponents(gameState)
-        opp1_idx, opp2_idx = opponents[0], opponents[1]
-
-        # Get opponent belief distributions
-        opp1_belief = self._get_opponent_pos_dist(opp1_idx)
-        opp2_belief = self._get_opponent_pos_dist(opp2_idx)
-
-        # Get agent positions
-        my_pos = gameState.getAgentPosition(my_idx)
-        teammate_pos = gameState.getAgentPosition(teammate_idx)
-
-        for i, (x, y) in enumerate(self.graph_nodes):
-            # --- Static Features (One-Hot Encoded) ---
-            cell_type = self._get_cell_type(x, y, gameState)
-            node_features[i][cell_type.value] = 1.0
-
-            # --- Dynamic Agent Features ---
-
-            # My agent's position
-            if (x, y) == my_pos:
-                node_features[i][7] = 1.0
-
-            # Teammate's position
-            if (x, y) == teammate_pos:
-                node_features[i][8] = 1.0
-
-            # --- Dynamic Opponent Belief Features ---
-            if opp1_belief:
-                node_features[i][9] = opp1_belief[x][y]
-
-            if opp2_belief:
-                node_features[i][10] = opp2_belief[x][y]
-
-        return node_features
+        return (self.width - 1 - pos[0], pos[1])

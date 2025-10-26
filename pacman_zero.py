@@ -1,6 +1,10 @@
 import torch
 import torch.nn as nn
 from capture import GameState
+from enum import IntEnum
+
+from captureAgents import CaptureAgent
+from myTeam import SmurphAgent
 
 
 class MCTSNode:
@@ -14,11 +18,16 @@ class MCTSNode:
 
 
 class MCTS:
-    def __init__(self, network: nn.Module, num_simulations=800):
-        # Takes the neural network as its guide.
-        pass
+    def __init__(
+        self, agent: SmurphAgent, agent_index: int, top_k: int = 1, batch_size: int = 32
+    ):
+        self.agent = agent
+        self.network = agent.network
+        self.index = agent_index
+        self.top_k = top_k
+        self.batch_size = batch_size
 
-    def run(self, root_state: GameState, agent_index: int) -> dict:
+    def run(self, root_state: GameState) -> dict:
         # 1. Creates a temporary root node.
         # 2. Runs the simulation loop (Selection, Expansion, Evaluation, Backpropagation) for num_simulations.
         # 3. Returns the final improved policy (a dictionary of {action: visit_count_probability}).
