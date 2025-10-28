@@ -1,91 +1,67 @@
-"""
-main_pacman.py - AlphaZero training script for Pacman Capture the Flag.
+import logging
 
-This configures and runs the AlphaZero training pipeline for 4-player Pacman CTF.
-"""
+import coloredlogs
 
 from Coach import Coach
-from PacmanGame import PacmanGame
-from PacmanNeuralNet import PacmanNeuralNet
-import numpy as np
-from pacman_args import TrainingArgs
+from PacmanGame import PacmanGame as Game
+from PacmanNeuralNet import PacmanNeuralNet as nn
+from utils import *
+
+log = logging.getLogger(__name__)
+
+coloredlogs.install(level="INFO")  # Change this to DEBUG to see more info.
+
+args = dotdict(
+    {
+        "numIters": 1,
+        "numEps": 0,  # Number of complete self-play games to simulate during a new iteration.
+        "tempThreshold": 15,  #
+        "updateThreshold": 0.55,  # During arena playoff, new neural net will be accepted if threshold or more of games are won.
+        "maxlenOfQueue": 200000,  # Number of game examples to train the neural networks.
+        "numMCTSSims": 5,  # Number of games moves for MCTS to simulate.
+        "arenaCompare": 20,  # Number of games to play during arena play to determine if new net will be accepted.
+        "cpuct": 1,
+        "checkpoint": "./temp/",
+        "load_model": True,
+        "load_folder_file": ("./checkpoint", "expert_data.pth.tar"),
+        "numItersForTrainExamplesHistory": 20,
+        "lr": 1e-3,
+        "weight_decay": 0,
+        "epochs": 10,
+        "batch_size": 64,
+        "bootstrap_iterations": 0,
+        "filter_winning_only": False,  # Set to True to only train on winning examples
+    }
+)
 
 
 def main():
-    """
-    Configure and run AlphaZero training for Pacman CTF.
-    """
+    log.info("Loading %s...", Game.__name__)
+    g = Game(layout_name="mediumCapture")
 
-    # ============ Game Configuration ============
-    game_args = {
-        "layout_name": "mediumCapture",  # or 'defaultCapture', 'strategicCapture', etc.
-        "time_limit": 1200,  # Total agent moves before truncation
-    }
+    log.info("Loading %s...", nn.__name__)
+    nnet = nn(g, args)
 
-    # ============ AlphaZero Training Configuration ============
-    train_args = TrainingArgs(
-        numIters=100,
-        numEps=25,
-        numMCTSSims=50,  # Reduced for faster testing
-    )
-
-    # ============ Initialize Components ============
-
-    print("=" * 60)
-    print("AlphaZero Training for Pacman Capture the Flag")
-    print("=" * 60)
-    print(f"Layout: {game_args['layout_name']}")
-    print(f"Time Limit: {game_args['time_limit']} agent moves")
-    print(f"MCTS Simulations: {train_args.numMCTSSims}")
-    print(f"Episodes per Iteration: {train_args.numEps}")
-    print(f"Total Iterations: {train_args.numIters}")
-    print("=" * 60)
-
-    # Create game
-    print("\nInitializing game...")
-    game = PacmanGame(**game_args)
-    print(f"Board size: {game.getBoardSize()}")
-    print(f"Action size: {game.getActionSize()}")
-
-    # Create neural network
-    print("\nInitializing neural network...")
-    nnet = PacmanNeuralNet(game, train_args)
-    print(f"Device: {nnet.device}")
-    print(f"Model parameters: {sum(p.numel() for p in nnet.nnet.parameters()):,}")
-
-    # Load checkpoint if requested
-    if train_args.load_model:
-        print(f"\nLoading checkpoint from {train_args.load_folder_file}...")
-        nnet.load_checkpoint(*train_args.load_folder_file)
-
-    # Create coach (training orchestrator)
-    print("\nInitializing coach...")
-    coach = Coach(game, nnet, train_args)
-
-    # ============ Start Training ============
-
-    print("\n" + "=" * 60)
-    print("Starting AlphaZero Training Loop")
-    print("=" * 60 + "\n")
-
-    try:
-        coach.learn()
-    except KeyboardInterrupt:
-        print("\n\nTraining interrupted by user.")
-        print("Saving checkpoint...")
-        nnet.save_checkpoint(
-            folder=train_args.checkpoint, filename="interrupted.pth.tar"
+    if args.load_model:
+        log.info(
+            'Loading checkpoint "%s/%s"...',
+            args.load_folder_file[0],
+            args.load_folder_file[1],
         )
-        print("Checkpoint saved. You can resume training by setting 'load_model': True")
+        nnet.load_checkpoint(args.load_folder_file[0], args.load_folder_file[1])
+    else:
+        log.warning("Not loading a checkpoint!")
 
-    print("\n" + "=" * 60)
-    print("Training Complete!")
-    print("=" * 60)
-    print(f"Final model saved in: {train_args.checkpoint}")
+    log.info("Loading the Coach...")
+    c = Coach(g, nnet, args)
+
+    if args.load_model:
+        log.info("Loading 'trainExamples' from file...")
+        c.loadTrainExamples()
+
+    log.info("Starting the learning process 🎉")
+    c.learn()
 
 
 if __name__ == "__main__":
-    # Set random seeds for reproducibility
-    np.random.seed(42)
-
     main()

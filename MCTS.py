@@ -47,7 +47,16 @@ class MCTS():
         counts = [self.Nsa[(s, a)] if (s, a) in self.Nsa else 0 for a in range(self.game.getActionSize())]
 
         if temp == 0:
-            bestAs = np.array(np.argwhere(counts == np.max(counts))).flatten()
+            # Mask invalid moves to prevent selecting illegal actions
+            valids = self.game.getValidMoves(canonicalBoard, 1)
+            counts_masked = np.array(counts) * valids
+
+            # If all valid moves have 0 count, fall back to uniform over valid moves
+            if np.sum(counts_masked) == 0:
+                log.warning("All valid moves have 0 visit count, choosing uniformly from valid moves")
+                counts_masked = valids
+
+            bestAs = np.array(np.argwhere(counts_masked == np.max(counts_masked))).flatten()
             bestA = np.random.choice(bestAs)
             probs = [0] * len(counts)
             probs[bestA] = 1

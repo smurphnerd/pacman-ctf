@@ -188,7 +188,6 @@ class PacmanGame(Game):
     def getSymmetries(self, board, pi):
         return [(board, pi)]
 
-    @profile
     def stringRepresentation(self, board):
         # Use spatial tensor and current agent for hash
         spatial_str = board["spatial"].tobytes().hex()

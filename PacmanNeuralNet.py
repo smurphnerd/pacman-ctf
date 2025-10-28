@@ -11,7 +11,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from NeuralNet import NeuralNet
-from pacman_args import TrainingArgs
 from myTeam import SmurphCNN
 
 try:
@@ -54,7 +53,7 @@ class PacmanNeuralNet(NeuralNet):
     Wrapper for SmurphCNN implementing NeuralNet interface.
     """
 
-    def __init__(self, game, args: TrainingArgs):
+    def __init__(self, game, args):
         """
         Args:
             game: PacmanGame instance
@@ -83,6 +82,11 @@ class PacmanNeuralNet(NeuralNet):
             weight_decay=args.weight_decay,
         )
 
+        # Bootstrap mode: use expert policy instead of neural network
+        self.bootstrap_mode = args.bootstrap_iterations > 0
+        if self.bootstrap_mode:
+            self._init_bootstrap_agents()
+
     @profile
     def train(self, examples):
         """
@@ -95,6 +99,17 @@ class PacmanNeuralNet(NeuralNet):
                 - v: Value from current board's perspective [-1, 1]
         """
         self.nnet.train()
+
+        # Filter to only winning examples (v = 1.0)
+        if hasattr(self.args, 'filter_winning_only') and self.args.filter_winning_only:
+            original_count = len(examples)
+            examples = [(board, pi, v) for board, pi, v in examples if v == 1.0]
+            filtered_count = len(examples)
+            print(f"Filtered dataset: {filtered_count}/{original_count} examples (winning only)")
+
+            if filtered_count == 0:
+                print("Warning: No winning examples found! Skipping training.")
+                return
 
         # Create dataset and dataloader
         dataset = PacmanDataset(examples)
@@ -169,6 +184,10 @@ class PacmanNeuralNet(NeuralNet):
             pi: Policy vector (action probabilities) [5]
             v: Value estimate [-1, 1]
         """
+        # Use bootstrap (expert) policy if enabled
+        if self.bootstrap_mode:
+            return self._predict_bootstrap(board)
+
         self.nnet.eval()
 
         with torch.no_grad():
@@ -228,3 +247,73 @@ class PacmanNeuralNet(NeuralNet):
         self.optimizer.load_state_dict(checkpoint["optimizer"])
 
         print(f"Checkpoint loaded from {filepath}")
+
+    def _init_bootstrap_agents(self):
+        """
+        Initialize staffTeam agents for bootstrap mode.
+        Creates expert agents that will be queried during MCTS instead of the neural network.
+        """
+        from staffTeam import createTeam
+
+        # Get initial game state for agent initialization
+        init_board = self.game.getInitBoard()
+        game_state = init_board["env"].game_state
+
+        # Create two expert agents for each team (red and blue)
+        # Red team: agents 0, 2 (player 1)
+        # Blue team: agents 1, 3 (player -1)
+        red_agents = createTeam(0, 2, True)
+        blue_agents = createTeam(1, 3, False)
+
+        self.bootstrap_agents = {
+            0: red_agents[0],  # Red agent 0
+            1: blue_agents[0],  # Blue agent 1
+            2: red_agents[1],  # Red agent 2
+            3: blue_agents[1],  # Blue agent 3
+        }
+
+        # Initialize all agents with the initial game state
+        for agent in self.bootstrap_agents.values():
+            agent.registerInitialState(game_state)
+
+        print("Bootstrap mode enabled: Using staffTeam expert policy for MCTS guidance")
+
+    def _predict_bootstrap(self, board):
+        """
+        Query staffTeam expert policy instead of neural network.
+
+        Args:
+            board: Board dict with spatial/scalar features and environment state
+
+        Returns:
+            pi: Expert policy vector (one-hot encoding of expert action) [5]
+            v: Value estimate (always 0.0 for bootstrap mode)
+        """
+        # Extract game state and current agent from board
+        game_state = board["env"].game_state
+        current_agent = board["current_agent"]
+
+        # Get the expert agent for current player
+        agent = self.bootstrap_agents[current_agent]
+
+        # Query expert for action
+        expert_action = agent.chooseAction(game_state)
+
+        # Convert action string to index
+        action_map = {
+            "North": 0,
+            "South": 1,
+            "East": 2,
+            "West": 3,
+            "Stop": 4,
+        }
+
+        action_idx = action_map[expert_action]
+
+        # Create one-hot policy vector
+        pi = np.zeros(5)
+        pi[action_idx] = 1.0
+
+        # Return policy and dummy value estimate
+        # We use 0.0 for value since the expert doesn't provide value estimates
+        return pi, np.array([0.0])

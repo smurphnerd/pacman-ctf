@@ -24,6 +24,7 @@ import belief_tracking
 try:
     profile
 except NameError:
+
     def profile(func):
         return func
 
@@ -127,7 +128,6 @@ class AlphaZeroPacmanEnv(gym.Env):
         # Initialize display if rendering
         self.display = None
 
-    @profile
     def reset(
         self, seed: Optional[int] = None, options: Optional[Dict] = None
     ) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
@@ -213,13 +213,18 @@ class AlphaZeroPacmanEnv(gym.Env):
         )
 
         # Check termination
-        terminated = self.game_state.isOver()
         truncated = self.steps >= self.time_limit
+        if truncated:
+            self.game_state.data._win = True
+        terminated = self.game_state.isOver()
 
         # Calculate reward (0 during play, +1/-1 at end from NEXT agent's perspective)
         reward = 0.0
         if terminated or truncated:
             reward = self._get_terminal_reward()
+            if reward == 0:
+                # Tie game
+                reward = 1e-8
 
         # Render if needed
         if self.render_mode == "human":
@@ -435,23 +440,15 @@ class AlphaZeroPacmanEnv(gym.Env):
         Returns:
             +1.0 if current team won
             -1.0 if current team lost
-            0.0 for tie
         """
         if not self.game_state.isOver():
             return 0.0
 
         score = self.game_state.getScore()  # Positive = Red winning
+        sign = 1.0 if score > 0 else -1.0 if score < 0 else 0.0
         current_team_is_red = self.current_agent in [0, 2]
 
-        if score > 0:
-            # Red won
-            return 1.0 if current_team_is_red else -1.0
-        elif score < 0:
-            # Blue won
-            return -1.0 if current_team_is_red else 1.0
-        else:
-            # Tie
-            return 0.0
+        return sign * (1.0 if current_team_is_red else -1.0)
 
     def _get_info(self) -> Dict[str, Any]:
         """Return additional information."""

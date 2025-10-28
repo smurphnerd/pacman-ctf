@@ -94,6 +94,12 @@ class Coach:
         for i in range(1, self.args.numIters + 1):
             # bookkeeping
             log.info(f"Starting Iter #{i} ...")
+
+            # Disable bootstrap mode after specified iterations
+            if hasattr(self.args, 'bootstrap_iterations') and i > self.args.bootstrap_iterations:
+                if hasattr(self.nnet, 'bootstrap_mode') and self.nnet.bootstrap_mode:
+                    self.nnet.bootstrap_mode = False
+                    log.info(f"Bootstrap mode disabled after {self.args.bootstrap_iterations} iterations. Switching to neural network.")
             # examples of the iteration
             if not self.skipFirstSelfPlay or i > 1:
                 iterationTrainExamples = deque([], maxlen=self.args.maxlenOfQueue)
