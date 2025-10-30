@@ -54,7 +54,7 @@ LONG_DISTANCE = 25
 
 
 def createTeam(
-    firstIndex, secondIndex, isRed, first="MixedAgent", second="MixedAgent", **kwargs
+    firstIndex, secondIndex, isRed, first="MixedAgent", second="MixedAgent"
 ):
     """
     This function should return a list of two agents that will form the
