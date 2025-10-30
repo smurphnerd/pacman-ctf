@@ -108,33 +108,6 @@
         )
     )
 
-    ;Opportunistic attack - go for food clusters
-    (:action collect_food_cluster
-        :parameters (?a - current_agent)
-        :precondition (and
-            (food_cluster_nearby ?a)
-            (is_pacman ?a)
-            (not (should_retreat ?a))
-        )
-        :effect (and
-            (food_in_backpack ?a)
-        )
-    )
-
-    ;Get power capsule for offensive advantage
-    (:action eat_capsule
-        :parameters (?a - current_agent ?e1 - enemy1 ?e2 - enemy2)
-        :precondition (and
-            (near_capsule ?a)
-            (capsule_available)
-        )
-        :effect (and
-            (is_scared ?e1)
-            (is_scared ?e2)
-            (not (capsule_available))
-        )
-    )
-
     ;Return home with food
     (:action go_home_with_food
         :parameters (?a - current_agent)
@@ -230,19 +203,6 @@
         )
     )
 
-    ;Guard strategic chokepoint
-    (:action guard_chokepoint
-        :parameters (?a - current_agent)
-        :precondition (and
-            (at_chokepoint ?a)
-            (not (is_pacman ?a))
-            (winning)
-        )
-        :effect (and
-            (defend_foods)
-        )
-    )
-
     ;Coordinated defense - stay near threatened food
     (:action defend_vulnerable_food
         :parameters (?a - current_agent ?e - enemy)
@@ -253,19 +213,6 @@
         )
         :effect (and
             (defend_foods)
-        )
-    )
-
-    ;Support ally under pressure
-    (:action support_ally
-        :parameters (?a - current_agent ?ally - ally)
-        :precondition (and
-            (more_enemies_around_ally)
-            (near_ally)
-            (not (is_pacman ?a))
-        )
-        :effect (and
-            (team_coordinated)
         )
     )
 

@@ -844,12 +844,10 @@ class MixedAgent(CaptureAgent):
         ##########
         # Classify high level actions into offensive, retreat, or defensive categories
         ##########
-        # Offensive actions: attack, aggressive_attack, collect_food_cluster, eat_capsule, desperate_attack
+        # Offensive actions: attack, aggressive_attack, desperate_attack
         if (
             highLevelAction == "attack"
             or highLevelAction == "aggressive_attack"
-            or highLevelAction == "collect_food_cluster"
-            or highLevelAction == "eat_capsule"
             or highLevelAction == "desperate_attack"
         ):
             # Offensive actions - use offensive features and rewards
