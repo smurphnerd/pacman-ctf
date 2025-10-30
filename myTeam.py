@@ -70,6 +70,7 @@ def createTeam(
     any extra arguments, so you should make sure that the default
     behavior is what you want for the nightly contest.
     """
+    raise Exception("This function is not implemented yet.")
     return [eval(first)(firstIndex), eval(second)(secondIndex)]
 
 
