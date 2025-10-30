@@ -30,7 +30,8 @@ import random, time, util, sys, os
 from capture import GameState, noisyDistance
 from game import Directions, Actions, AgentState, Agent
 from util import nearestPoint
-import sys, os
+import sys, os, pickle
+from belief_tracking import initialize_beliefs, update_all_beliefs
 
 # the folder of current file.
 BASE_FOLDER = os.path.dirname(os.path.abspath(__file__))
@@ -135,49 +136,81 @@ class MixedAgent(CaptureAgent):
 
     # Also can use class variable to exchange information between agents.
     CURRENT_ACTION = {}
+    ESTIMATED_POSITIONS = {}  # Cache for estimated enemy positions using beliefs
 
     def registerInitialState(self, gameState: GameState):
-        self.pddl_solver = pddl_solver(BASE_FOLDER+'/myTeam.pddl')
-        self.highLevelPlan: List[Tuple[Action,pddl_state]] = None # Plan is a list Action and pddl_state
+        self.pddl_solver = pddl_solver(BASE_FOLDER + "/claudeTeam.pddl")
+        self.highLevelPlan: List[
+            Tuple[Action, pddl_state]
+        ] = None  # Plan is a list Action and pddl_state
         self.currentNegativeGoalStates = []
         self.currentPositiveGoalStates = []
-        self.currentActionIndex = 0 # index of action in self.highLevelPlan should be execute next
+        self.currentActionIndex = (
+            0  # index of action in self.highLevelPlan should be execute next
+        )
 
-        self.startPosition = gameState.getAgentPosition(self.index) # the start location of the agent
+        self.startPosition = gameState.getAgentPosition(
+            self.index
+        )  # the start location of the agent
         CaptureAgent.registerInitialState(self, gameState)
 
-        self.lowLevelPlan: List[Tuple[str,Tuple]] = []
+        self.lowLevelPlan: List[Tuple[str, Tuple]] = []
         self.lowLevelActionIndex = 0
 
         # REMEMBER TRUN TRAINNING TO FALSE when submit to contest server.
-        self.trainning = False # trainning mode to true will keep update weights and generate random movements by prob.
-        self.epsilon = 0.1 #default exploration prob, change to take a random step
-        self.alpha = 0.02 #default learning rate
-        self.discountRate = 0.9 # default discount rate on successor state q value when update
+        self.trainning = False  # trainning mode to true will keep update weights and generate random movements by prob.
+        self.epsilon = 0.1  # default exploration prob, change to take a random step
+        self.alpha = 0.02  # default learning rate
+        self.discountRate = (
+            0.9  # default discount rate on successor state q value when update
+        )
+
+        # Load learned weights if they exist
+        try:
+            if os.path.exists(MixedAgent.QLWeightsFile):
+                with open(MixedAgent.QLWeightsFile, "rb") as f:
+                    MixedAgent.QLWeights = pickle.load(f)
+                print(
+                    f"Agent {self.index}: Loaded learned weights from {MixedAgent.QLWeightsFile}"
+                )
+        except Exception as e:
+            print(f"Agent {self.index}: Could not load weights: {e}")
+
+        # Initialize belief tracking for opponents
+
+        self.use_beliefs = True
+        if (
+            not hasattr(MixedAgent, "OPPONENT_BELIEFS")
+            or len(MixedAgent.OPPONENT_BELIEFS) == 0
+        ):
+            MixedAgent.OPPONENT_BELIEFS = initialize_beliefs(gameState)
 
         # Use a dictionary to save information about current agent.
-        MixedAgent.CURRENT_ACTION[self.index]={}
-        """
-        Open weights file if it exists, otherwise start with empty weights.
-        NEEDS TO BE CHANGED BEFORE SUBMISSION
+        MixedAgent.CURRENT_ACTION[self.index] = {}
 
-        """
-        if os.path.exists(MixedAgent.QLWeightsFile):
-            with open(MixedAgent.QLWeightsFile, "r") as file:
-                MixedAgent.QLWeights = eval(file.read())
-            print("Load QLWeights:",MixedAgent.QLWeights )
-
-
-    def final(self, gameState : GameState):
+    def final(self, gameState: GameState):
         """
         This function write weights into files after the game is over.
         You may want to comment (disallow) this function when submit to contest server.
         """
         if self.trainning:
-            print("Write QLWeights:", MixedAgent.QLWeights)
-            file = open(MixedAgent.QLWeightsFile, 'w')
-            file.write(str(MixedAgent.QLWeights))
-            file.close()
+            # Only save from one agent to avoid race condition
+            if self.index == 0:
+                try:
+                    with open(MixedAgent.QLWeightsFile, "wb") as f:
+                        pickle.dump(MixedAgent.QLWeights, f)
+                    print(
+                        f"Agent {self.index}: Saved learned weights to {MixedAgent.QLWeightsFile}"
+                    )
+                    print(
+                        "Offensive weights:", MixedAgent.QLWeights["offensiveWeights"]
+                    )
+                    print(
+                        "Defensive weights:", MixedAgent.QLWeights["defensiveWeights"]
+                    )
+                    print("Escape weights:", MixedAgent.QLWeights["escapeWeights"])
+                except Exception as e:
+                    print(f"Agent {self.index}: Could not save weights: {e}")
 
     def chooseAction(self, gameState: GameState):
         """
