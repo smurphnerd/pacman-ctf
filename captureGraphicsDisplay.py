@@ -416,20 +416,69 @@ class PacmanGraphics:
     moveCircle(eyes[3],(screen_x+self.gridSize*GHOST_SIZE*(0.3+dx), screen_y-self.gridSize*GHOST_SIZE*(0.3-dy)), self.gridSize*GHOST_SIZE*0.08)
 
   def moveGhost(self, ghost, ghostIndex, prevGhost, ghostImageParts):
-    old_x, old_y = self.to_screen(self.getPosition(prevGhost))
-    new_x, new_y = self.to_screen(self.getPosition(ghost))
-    delta = new_x - old_x, new_y - old_y
+    # Handle keyboard stepping mode
+    if self.frameTime < 0:
+      print('Press any key to step forward, "q" to play')
+      keys = wait_for_keys()
+      if 'q' in keys:
+        self.frameTime = 0.0001
 
-    for ghostImagePart in ghostImageParts:
-      move_by(ghostImagePart, delta, lift=True)
-    refresh()
+    # Animate ghost movement if frameTime is set
+    if self.frameTime >= 0.0001 or self.frameTime < 0:
+      start = time.time()
+      fx, fy = self.getPosition(prevGhost)
+      gx, gy = self.getPosition(ghost)
+      frames = 4.0
 
-    if ghost.scaredTimer > 0:
-      color = SCARED_COLOR
+      for i in range(1, int(frames) + 1):
+        # Interpolate position
+        pos = gx*i/frames + fx*(frames-i)/frames, gy*i/frames + fy*(frames-i)/frames
+
+        # Calculate delta for this frame
+        if i == 1:
+          # First frame: move from previous position
+          prev_pos = self.to_screen((fx, fy))
+        else:
+          # Subsequent frames: move from last interpolated position
+          prev_pos = self.to_screen((gx*(i-1)/frames + fx*(frames-i+1)/frames,
+                                     gy*(i-1)/frames + fy*(frames-i+1)/frames))
+
+        curr_pos = self.to_screen(pos)
+        delta = curr_pos[0] - prev_pos[0], curr_pos[1] - prev_pos[1]
+
+        # Move all ghost parts by the incremental delta
+        for ghostImagePart in ghostImageParts:
+          move_by(ghostImagePart, delta, lift=True)
+
+        # Update color
+        if ghost.scaredTimer > 0:
+          color = SCARED_COLOR
+        else:
+          color = GHOST_COLORS[ghostIndex]
+        edit(ghostImageParts[0], ('fill', color), ('outline', color))
+
+        # Update eyes position
+        self.moveEyes(pos, self.getDirection(ghost), ghostImageParts[-4:])
+
+        refresh()
+        sleep(abs(self.frameTime) / frames)
     else:
-      color = GHOST_COLORS[ghostIndex]
-    edit(ghostImageParts[0], ('fill', color), ('outline', color))
-    self.moveEyes(self.getPosition(ghost), self.getDirection(ghost), ghostImageParts[-4:])
+      # Fast mode: move instantly
+      old_x, old_y = self.to_screen(self.getPosition(prevGhost))
+      new_x, new_y = self.to_screen(self.getPosition(ghost))
+      delta = new_x - old_x, new_y - old_y
+
+      for ghostImagePart in ghostImageParts:
+        move_by(ghostImagePart, delta, lift=True)
+      refresh()
+
+      if ghost.scaredTimer > 0:
+        color = SCARED_COLOR
+      else:
+        color = GHOST_COLORS[ghostIndex]
+      edit(ghostImageParts[0], ('fill', color), ('outline', color))
+      self.moveEyes(self.getPosition(ghost), self.getDirection(ghost), ghostImageParts[-4:])
+
     refresh()
 
   def getPosition(self, agentState):

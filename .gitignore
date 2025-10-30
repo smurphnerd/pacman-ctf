@@ -6,3 +6,6 @@ configs/
 experiences/
 logs/
 weights/
+checkpoint/
+temp/
+expert_replays/

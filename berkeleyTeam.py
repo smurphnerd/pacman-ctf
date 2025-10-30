@@ -38,6 +38,7 @@ def createTeam(
     isRed,
     first="OffensiveReflexAgent",
     second="DefensiveReflexAgent",
+    **kwargs
 ):
     """
     This function should return a list of two agents that will form the

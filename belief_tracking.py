@@ -16,8 +16,10 @@ from util import manhattanDistance
 try:
     profile
 except NameError:
+
     def profile(func):
         return func
+
 
 @profile
 def initialize_beliefs(game_state: GameState) -> Dict[int, List[List[float]]]:
@@ -50,43 +52,6 @@ def initialize_beliefs(game_state: GameState) -> Dict[int, List[List[float]]]:
     return beliefs
 
 
-def is_opponent_visible(
-    game_state: GameState, observer_idx: int, opponent_idx: int
-) -> bool:
-    """
-    Check if an opponent is visible to any teammate of the observer.
-
-    An opponent is visible if within SIGHT_RANGE (5 Manhattan distance) of any teammate.
-
-    Args:
-        game_state: Current game state
-        observer_idx: Index of observing agent
-        opponent_idx: Index of opponent to check
-
-    Returns:
-        True if opponent is visible to observer's team
-    """
-    opponent_pos = game_state.getAgentPosition(opponent_idx)
-
-    if opponent_pos is None:
-        return False
-
-    # Get observer's team
-    if observer_idx in [0, 2]:
-        team = [0, 2]  # Red team
-    else:
-        team = [1, 3]  # Blue team
-
-    # Check if any teammate can see the opponent
-    for teammate_idx in team:
-        teammate_pos = game_state.getAgentPosition(teammate_idx)
-        if teammate_pos is not None:
-            if manhattanDistance(opponent_pos, teammate_pos) <= SIGHT_RANGE:
-                return True
-
-    return False
-
-
 @profile
 def update_belief(
     prev_belief: List[List[float]],
@@ -115,7 +80,7 @@ def update_belief(
     width, height = walls.width, walls.height
 
     # Step 1: Check if opponent is visible
-    if is_opponent_visible(game_state, observer_idx, opponent_idx):
+    if game_state.getAgentPosition(opponent_idx) is not None:
         # EXACT OBSERVATION - reset belief to certain position
         opponent_pos = game_state.getAgentPosition(opponent_idx)
         new_belief = [[0.0 for _ in range(height)] for _ in range(width)]
@@ -145,7 +110,7 @@ def update_belief(
     # Step 3: Bayesian update using noisy distance observation
     observer_pos = game_state.getAgentPosition(observer_idx)
     noisy_distances = game_state.getAgentDistances()
-    assert noisy_distances, "No distances provided"
+    assert noisy_distances
     noisy_dist = noisy_distances[opponent_idx]
 
     updated_belief = [[0.0 for _ in range(height)] for _ in range(width)]
@@ -202,25 +167,3 @@ def update_all_beliefs(
         )
 
     return updated_beliefs
-
-
-def get_belief_as_array(
-    belief: List[List[float]], width: int, height: int
-) -> List[List[float]]:
-    """
-    Helper to ensure belief is proper 2D array format.
-
-    Args:
-        belief: Belief distribution (may be None or malformed)
-        width: Board width
-        height: Board height
-
-    Returns:
-        Valid 2D probability array
-    """
-    if belief is None:
-        # Return uniform distribution over non-wall positions
-        # (This shouldn't happen with proper initialization)
-        return [[1.0 / (width * height) for _ in range(height)] for _ in range(width)]
-
-    return belief
