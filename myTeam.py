@@ -187,12 +187,7 @@ class MixedAgent(CaptureAgent):
             print(f"Agent {self.index}: Could not load weights: {e}")
 
         # Initialize belief tracking for opponents
-
-        if (
-            not hasattr(MixedAgent, "OPPONENT_BELIEFS")
-            or len(MixedAgent.OPPONENT_BELIEFS) == 0
-        ):
-            MixedAgent.OPPONENT_BELIEFS = initialize_beliefs(gameState)
+        MixedAgent.OPPONENT_BELIEFS = initialize_beliefs(gameState)
 
         # Use a dictionary to save information about current agent.
         MixedAgent.CURRENT_ACTION[self.index] = {}
