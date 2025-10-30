@@ -192,7 +192,6 @@ class MixedAgent(CaptureAgent):
 
         # Use a dictionary to save information about current agent.
         MixedAgent.CURRENT_ACTION[self.index] = {}
-        raise Exception("I'm a fugitive")
 
     def final(self, gameState: GameState):
         """
