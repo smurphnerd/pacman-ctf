@@ -31,7 +31,6 @@ from capture import GameState, noisyDistance
 from game import Directions, Actions, AgentState, Agent
 from util import nearestPoint
 import sys,os
-from belief_tracking import initialize_beliefs, update_all_beliefs
 
 # the folder of current file.
 BASE_FOLDER = os.path.dirname(os.path.abspath(__file__))
