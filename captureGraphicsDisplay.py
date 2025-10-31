@@ -342,7 +342,7 @@ class PacmanGraphics:
       keys = wait_for_keys()
       if 'q' in keys:
         self.frameTime = 0.0001
-    if self.frameTime >= 0.0001 or self.frameTime < 0:
+    if self.frameTime >= 0.0001:
       start = time.time()
       fx, fy = self.getPosition(prevPacman)
       px, py = self.getPosition(pacman)
@@ -424,7 +424,7 @@ class PacmanGraphics:
         self.frameTime = 0.0001
 
     # Animate ghost movement if frameTime is set
-    if self.frameTime >= 0.0001 or self.frameTime < 0:
+    if self.frameTime >= 0.0001:
       start = time.time()
       fx, fy = self.getPosition(prevGhost)
       gx, gy = self.getPosition(ghost)
@@ -463,7 +463,7 @@ class PacmanGraphics:
         refresh()
         sleep(abs(self.frameTime) / frames)
     else:
-      # Fast mode: move instantly
+      # Fast mode: move instantly (used when frameTime < 0 for keyboard stepping)
       old_x, old_y = self.to_screen(self.getPosition(prevGhost))
       new_x, new_y = self.to_screen(self.getPosition(ghost))
       delta = new_x - old_x, new_y - old_y
