@@ -99,6 +99,7 @@ class MixedAgent(CaptureAgent):
             "got-eaten": -1000000,  # Priority -1 (less better) - CRITICAL: got eaten
             "breathing-distance-ghosts": -10000,  # Priority 1 (less better) - CRITICAL: avoid ghosts
             "in-enemy-territory": 1000,  # Priority 2 (more better) - main goal
+            "close-distance-ghosts": -500,  # Priority 2 (less better) - CRITICAL: avoid ghosts
             "distance-to-enemy-territory": -100,  # Priority 3 (closer better) - guide to border
             "distance-to-teammate": 10,  # Priority 4 (further better) - spread out
             "stop-reverse": -5,
@@ -132,6 +133,7 @@ class MixedAgent(CaptureAgent):
         },
         "chaseWeights": {
             "got-eaten": -1000000,  # Priority -1 (less better) - CRITICAL: got eaten
+            "ate_enemy": 1000000,
             # "in-home": 100000,  # Priority 1 - MUST stay in home territory
             "distance-to-enemy": -1000,  # Priority 2 (closer better) - get to target
             "between-enemy-and-escape": 100,  # Priority 3 - intercept bonus
@@ -182,7 +184,7 @@ class MixedAgent(CaptureAgent):
         self.defensiveDistancer = self.createDefensiveDistancer(gameState)
         self.defensiveDistancer.getMazeDistances()
 
-        self.debug = False
+        self.debug = True
 
         # Calculate total starting food and thresholds (once per game)
         red_food = gameState.getRedFood().count()
@@ -653,9 +655,7 @@ class MixedAgent(CaptureAgent):
                         ) in initState:
                             if not (("ally_chasing", enemy_obj) in initState):
                                 if self.debug:
-                                    print(
-                                        f"Agent {self.index}: Pacman - priority 0/0"
-                                    )
+                                    print(f"Agent {self.index}: Pacman - priority 0/0")
                                 return self.goalChase(objects, initState, enemy_obj)
                     for enemy_obj in enemy_objects:
                         if ("enemy_past", enemy_obj) in initState and (
@@ -664,9 +664,7 @@ class MixedAgent(CaptureAgent):
                         ) in initState:
                             if not (("ally_chasing", enemy_obj) in initState):
                                 if self.debug:
-                                    print(
-                                        f"Agent {self.index}: Pacman - priority 0/1"
-                                    )
+                                    print(f"Agent {self.index}: Pacman - priority 0/1")
                                 return self.goalChase(objects, initState, enemy_obj)
                     for enemy_obj in enemy_objects:
                         if ("enemy_past", enemy_obj) in initState and (
@@ -675,17 +673,13 @@ class MixedAgent(CaptureAgent):
                         ) in initState:
                             if not (("ally_chasing", enemy_obj) in initState):
                                 if self.debug:
-                                    print(
-                                        f"Agent {self.index}: Pacman - priority 0/2"
-                                    )
+                                    print(f"Agent {self.index}: Pacman - priority 0/2")
                                 return self.goalChase(objects, initState, enemy_obj)
                     for enemy_obj in enemy_objects:
                         if ("enemy_past", enemy_obj) in initState:
                             if not (("ally_chasing", enemy_obj) in initState):
                                 if self.debug:
-                                    print(
-                                        f"Agent {self.index}: Pacman - priority 0/3"
-                                    )
+                                    print(f"Agent {self.index}: Pacman - priority 0/3")
                                 return self.goalChase(objects, initState, enemy_obj)
 
             # Priority 1: Eat capsule if we're closest
@@ -1365,6 +1359,10 @@ class MixedAgent(CaptureAgent):
             nextPos, nextStateInfo.enemyVirtualStates
         )
 
+        features["close-distance-ghosts"] = self.getCloseDistanceGhosts(
+            nextPos, nextStateInfo.enemyVirtualStates
+        )
+
         # Priority 2: Reward being in enemy territory
         features["in-enemy-territory"] = (
             1.0 if self.isInEnemyTerritory(nextPos, nextStateInfo.gameState) else 0.0
@@ -1580,6 +1578,13 @@ class MixedAgent(CaptureAgent):
         # features["in-home"] = (
         #     1.0 if self.isInHome(nextPos, nextStateInfo.gameState) else 0.0
         # )
+
+        features["ate_enemy"] = (
+            1.0
+            if target_enemy_state.getPosition()
+            == target_enemy_state.start.getPosition()
+            else 0.0
+        )
 
         # Priority 2: Get closer to target enemy
         features["distance-to-enemy"] = self.getDistanceToEnemy(
