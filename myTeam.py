@@ -157,12 +157,15 @@ class MixedAgent(CaptureAgent):
     CONSECUTIVE_STOP_REVERSE = {}  # Tracks consecutive stop/reverse moves per agent
     DEFENSIVE_ASSIGNMENTS = defaultdict(int)
     NUM_GAMES = 0
-    LAYOUTS = []
+    LAYOUTS = set()
+
+    # Replay system - stores game states from team's perspective
+    REPLAY_DATA = []  # List of (gameState, virtualEnemyStates, agentIndex) tuples
 
     def registerInitialState(self, gameState: GameState):
         if self.index in [0, 1]:
             MixedAgent.NUM_GAMES += 1
-            MixedAgent.LAYOUTS.append(gameState.data.layout.layoutText)
+            MixedAgent.LAYOUTS.add(str(gameState.data.layout))
 
         if MixedAgent.NUM_GAMES == 49:
             bytes_ = pickle.dumps(MixedAgent.LAYOUTS)
@@ -322,6 +325,15 @@ class MixedAgent(CaptureAgent):
 
         # Cache estimated enemy positions for this turn (computed once, reused many times)
         self.updateEstimatedPositions(gameState)
+
+        # Record replay data with virtual enemy states
+        stateInfo = self.getStateInfo(gameState)
+        MixedAgent.REPLAY_DATA.append({
+            'gameState': gameState,
+            'virtualEnemyStates': stateInfo.enemyVirtualStates,
+            'agentIndex': self.index,
+            'timeStep': len(MixedAgent.REPLAY_DATA)
+        })
 
         # -------------High Level Plan Section-------------------
         # Get high level action from a pddl plan.
