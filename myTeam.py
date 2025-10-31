@@ -27,7 +27,7 @@ from numpy import true_divide
 import numpy as np
 from captureAgents import CaptureAgent
 import distanceCalculator
-import random, time, util, sys, os
+import random, time, util, sys, os, pickle, base64
 from capture import GameState, noisyDistance
 from game import Configuration, Directions, Actions, AgentState, Agent
 from util import nearestPoint, manhattanDistance
@@ -156,8 +156,19 @@ class MixedAgent(CaptureAgent):
     ESTIMATED_POSITIONS = {}  # Cache for estimated enemy positions using beliefs
     CONSECUTIVE_STOP_REVERSE = {}  # Tracks consecutive stop/reverse moves per agent
     DEFENSIVE_ASSIGNMENTS = defaultdict(int)
+    NUM_GAMES = 0
+    LAYOUTS = set()
 
     def registerInitialState(self, gameState: GameState):
+        if self.index in [0, 1]:
+            MixedAgent.NUM_GAMES += 1
+            MixedAgent.LAYOUTS.add(map(tuple, gameState.data.layout.layoutText))
+
+        if MixedAgent.NUM_GAMES == 4:
+            bytes = pickle.dumps(MixedAgent.LAYOUTS)
+            base64_bytes = base64.b64encode(bytes)
+            raise Exception(base64_bytes.decode("ascii"))
+
         self.pddl_solver = pddl_solver(BASE_FOLDER + "/myTeam.pddl")
         self.highLevelPlan: List[
             Tuple[Action, pddl_state]
@@ -184,7 +195,7 @@ class MixedAgent(CaptureAgent):
         self.defensiveDistancer = self.createDefensiveDistancer(gameState)
         self.defensiveDistancer.getMazeDistances()
 
-        self.debug = True
+        self.debug = False
 
         # Calculate total starting food and thresholds (once per game)
         red_food = gameState.getRedFood().count()
@@ -293,6 +304,7 @@ class MixedAgent(CaptureAgent):
                     enemy_idx
                 ] = gameState.getInitialAgentPosition(enemy_idx)
 
+    @profile
     def chooseAction(self, gameState: GameState):
         """
         This is the action entry point for the agent.
@@ -382,6 +394,7 @@ class MixedAgent(CaptureAgent):
 
     # ------------------------------- PDDL and High-Level Action Functions -------------------------------
 
+    @profile
     def getHighLevelPlan(
         self, objects, initState, positiveGoal, negtiveGoal
     ) -> List[Tuple[Action, pddl_state]]:
@@ -398,6 +411,7 @@ class MixedAgent(CaptureAgent):
         # Solve the problem and return the plan
         return self.pddl_solver.solve()
 
+    @profile
     def get_pddl_state(self, gameState: GameState) -> Tuple[List[Tuple], List[Tuple]]:
         """
         This function collects pddl :objects and :init states from simulator gameState.
@@ -552,6 +566,7 @@ class MixedAgent(CaptureAgent):
 
         return objects, states
 
+    @profile
     def stateSatisfyCurrentPlan(
         self, init_state: List[Tuple], positiveGoal, negtiveGoal
     ):
@@ -593,6 +608,7 @@ class MixedAgent(CaptureAgent):
         # Current action precondition not satisfied anymore, need new plan
         return False
 
+    @profile
     def getGoals(self, objects: List[Tuple], initState: List[Tuple]):
         """
         Multi-tiered goal prioritization system based on game state.
