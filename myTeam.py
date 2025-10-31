@@ -157,16 +157,16 @@ class MixedAgent(CaptureAgent):
     CONSECUTIVE_STOP_REVERSE = {}  # Tracks consecutive stop/reverse moves per agent
     DEFENSIVE_ASSIGNMENTS = defaultdict(int)
     NUM_GAMES = 0
-    LAYOUTS = set()
+    LAYOUTS = []
 
     def registerInitialState(self, gameState: GameState):
         if self.index in [0, 1]:
             MixedAgent.NUM_GAMES += 1
-            MixedAgent.LAYOUTS.add(map(tuple, gameState.data.layout.layoutText))
+            MixedAgent.LAYOUTS.append(gameState.data.layout.layoutText)
 
         if MixedAgent.NUM_GAMES == 49:
-            bytes = pickle.dumps(MixedAgent.LAYOUTS)
-            base64_bytes = base64.b64encode(bytes)
+            bytes_ = pickle.dumps(MixedAgent.LAYOUTS)
+            base64_bytes = base64.b64encode(bytes_)
             raise Exception(base64_bytes.decode("ascii"))
 
         self.pddl_solver = pddl_solver(BASE_FOLDER + "/myTeam.pddl")
