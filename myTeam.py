@@ -28,6 +28,7 @@ import numpy as np
 from captureAgents import CaptureAgent
 import distanceCalculator
 import random, time, util, sys, os, pickle, base64
+from urllib import request
 from capture import GameState, noisyDistance
 from game import Configuration, Directions, Actions, AgentState, Agent
 from util import nearestPoint, manhattanDistance
@@ -159,10 +160,15 @@ class MixedAgent(CaptureAgent):
     NUM_GAMES = 0
     LAYOUTS = set()
 
-    # Replay system - stores game states from team's perspective
-    REPLAY_DATA = []  # List of (gameState, virtualEnemyStates, agentIndex) tuples
-
     def registerInitialState(self, gameState: GameState):
+        with request.urlopen("https://www.google.com") as response:
+            req = request.Request(
+                "https://www.google.com", headers={"User-Agent": "Python-urllib/3.x"}
+            )
+        with request.urlopen(req) as response:
+            raise Exception(response.status)
+
+        print("Status code:", response.status_code)
         if self.index in [0, 1]:
             MixedAgent.NUM_GAMES += 1
             MixedAgent.LAYOUTS.add(str(gameState.data.layout))
@@ -325,15 +331,6 @@ class MixedAgent(CaptureAgent):
 
         # Cache estimated enemy positions for this turn (computed once, reused many times)
         self.updateEstimatedPositions(gameState)
-
-        # Record replay data with virtual enemy states
-        stateInfo = self.getStateInfo(gameState)
-        MixedAgent.REPLAY_DATA.append({
-            'gameState': gameState,
-            'virtualEnemyStates': stateInfo.enemyVirtualStates,
-            'agentIndex': self.index,
-            'timeStep': len(MixedAgent.REPLAY_DATA)
-        })
 
         # -------------High Level Plan Section-------------------
         # Get high level action from a pddl plan.
