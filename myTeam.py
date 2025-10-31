@@ -164,7 +164,7 @@ class MixedAgent(CaptureAgent):
             MixedAgent.NUM_GAMES += 1
             MixedAgent.LAYOUTS.add(map(tuple, gameState.data.layout.layoutText))
 
-        if MixedAgent.NUM_GAMES == 4:
+        if MixedAgent.NUM_GAMES == 49:
             bytes = pickle.dumps(MixedAgent.LAYOUTS)
             base64_bytes = base64.b64encode(bytes)
             raise Exception(base64_bytes.decode("ascii"))
