@@ -139,7 +139,7 @@
     )
 
     ;Defend - default defensive behavior (patrol, guard food)
-    (:action defend
+    (:action default_defend
         :parameters (?a - current_agent)
         :precondition (and
             (not (is_pacman ?a))

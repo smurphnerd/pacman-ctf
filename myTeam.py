@@ -34,6 +34,7 @@ from util import nearestPoint, manhattanDistance
 import sys, os
 import pickle
 from dataclasses import dataclass
+from collections import defaultdict
 
 
 @dataclass
@@ -59,6 +60,7 @@ from lib_piglet.utils.pddl_solver import pddl_solver
 from lib_piglet.domains.pddl import pddl_state
 from lib_piglet.utils.pddl_parser import Action
 
+DEATH_DISTANCE = 1
 BREATHING_DISTANCE = 2
 CLOSE_DISTANCE = 4
 MEDIUM_DISTANCE = 15
@@ -99,8 +101,7 @@ class MixedAgent(CaptureAgent):
             "in-enemy-territory": 1000,  # Priority 2 (more better) - main goal
             "distance-to-enemy-territory": -100,  # Priority 3 (closer better) - guide to border
             "distance-to-teammate": 10,  # Priority 4 (further better) - spread out
-            "stop": -1,
-            "reverse": -1,
+            "stop-reverse": -5,
         },
         "eatFoodWeights": {
             "got-eaten": -1000000,  # Priority -1 (less better) - CRITICAL: got eaten
@@ -110,8 +111,7 @@ class MixedAgent(CaptureAgent):
             "distance-to-nearest-food": -100,  # Priority 3 (closer better) - guide to food
             "close-distance-ghosts": -10,  # Priority 4 (less better) - minor ghost avoidance
             "distance-to-attacking-teammate": 90,  # Priority 5 (closer better) - guide to attacking teammate
-            "stop": -1,
-            "reverse": -1,
+            "stop-reverse": -5,
         },
         "eatCapsuleWeights": {
             "got-eaten": -1000000,  # Priority -1 (less better) - CRITICAL: got eaten
@@ -120,8 +120,7 @@ class MixedAgent(CaptureAgent):
             "ate-capsule": 100000,  # Priority 2 - big reward for eating capsule
             "distance-to-nearest-capsule": -100,  # Priority 3 (closer better) - guide to capsule
             "close-distance-ghosts": -10,  # Priority 4 (less better) - minor ghost avoidance
-            "stop": -1,
-            "reverse": -1,
+            "stop-reverse": -5,
         },
         "escapeWeights": {
             "got-eaten": -1000000,  # Priority -1 (less better) - CRITICAL: got eaten
@@ -129,8 +128,7 @@ class MixedAgent(CaptureAgent):
             "breathing-distance-ghosts": -1000,  # Priority 2 (less better) - avoid immediate danger
             "distance-to-home": -1000,  # Priority 2 - get home quickly
             "close-distance-ghosts": -100,  # Priority 3 (less better) - avoid nearby ghosts
-            "stop": -1,
-            "reverse": -1,
+            "stop-reverse": -5,
         },
         "chaseWeights": {
             "got-eaten": -1000000,  # Priority -1 (less better) - CRITICAL: got eaten
@@ -138,8 +136,7 @@ class MixedAgent(CaptureAgent):
             "distance-to-enemy": -1000,  # Priority 2 (closer better) - get to target
             "between-enemy-and-escape": 100,  # Priority 3 - intercept bonus
             "distance-to-teammate": 10,  # Priority 4 (further better) - spread out
-            "stop": -1,
-            "reverse": -1,
+            "stop-reverse": -5,
         },
         "defaultDefendWeights": {
             "got-eaten": -1000000,  # Priority -1 (less better) - CRITICAL: got eaten
@@ -147,8 +144,7 @@ class MixedAgent(CaptureAgent):
             "distance-to-nearest-enemy": -1000,  # Priority 2 (closer better) - position near threats
             "distance-to-teammate": 10,  # Priority 3 (further better) - spread out
             "distance-to-teammate-both-defending": 900,  # Priority 4 (further better) - spread out
-            "stop": -1,
-            "reverse": -1,
+            # "stop-reverse": -5,
         },
     }
     QLWeightsFile = BASE_FOLDER + "/QLWeightsMyTeam.pkl"
@@ -156,6 +152,8 @@ class MixedAgent(CaptureAgent):
     # Also can use class variable to exchange information between agents.
     CURRENT_ACTION = {}
     ESTIMATED_POSITIONS = {}  # Cache for estimated enemy positions using beliefs
+    CONSECUTIVE_STOP_REVERSE = {}  # Tracks consecutive stop/reverse moves per agent
+    DEFENSIVE_ASSIGNMENTS = defaultdict(int)
 
     def registerInitialState(self, gameState: GameState):
         self.pddl_solver = pddl_solver(BASE_FOLDER + "/myTeam.pddl")
@@ -175,6 +173,9 @@ class MixedAgent(CaptureAgent):
 
         self.lowLevelPlan: List[Tuple[str, Tuple]] = []
         self.lowLevelActionIndex = 0
+
+        # Initialize consecutive stop/reverse counter for this agent
+        MixedAgent.CONSECUTIVE_STOP_REVERSE[self.index] = 0
 
         # Create a defensive distance calculator that treats enemy territory as walls
         # This helps defensive agents find optimal patrol positions at the border
@@ -335,7 +336,7 @@ class MixedAgent(CaptureAgent):
         if not self.highLevelPlan:
             if self.debug:
                 print(f"No plan found for predicates: {initState}")
-            highLevelAction = Action("defend", None, [], [], [], [])
+            highLevelAction = Action("default_defend", None, [], [], [], [])
         else:
             # Get next action from the plan
             highLevelAction = self.highLevelPlan[self.currentActionIndex][0]
@@ -343,6 +344,9 @@ class MixedAgent(CaptureAgent):
 
         if self.debug:
             print(f"Agent {self.index}: High-Level Action = {highLevelAction.name}")
+
+        if highLevelAction.name != "default_defend":
+            MixedAgent.DEFENSIVE_ASSIGNMENTS[self.index] = -1
 
         # -------------Low Level Plan Section-------------------
         # Get the low level plan using Q learning, and return a low level action at last.
@@ -356,6 +360,21 @@ class MixedAgent(CaptureAgent):
             self.lowLevelActionIndex = 0
         lowLevelAction = self.lowLevelPlan[self.lowLevelActionIndex][0]
         self.lowLevelActionIndex += 1
+
+        # Update consecutive stop/reverse counter
+        agentState = gameState.getAgentState(self.index)
+        is_stop = lowLevelAction == Directions.STOP
+        is_reverse = (
+            lowLevelAction == Directions.REVERSE[agentState.configuration.direction]
+        )
+
+        if is_stop or is_reverse:
+            # Increment counter for consecutive stop/reverse
+            MixedAgent.CONSECUTIVE_STOP_REVERSE[self.index] += 1
+        else:
+            # Reset counter - agent is making a productive move
+            MixedAgent.CONSECUTIVE_STOP_REVERSE[self.index] = 0
+
         # print("\tAgent:", self.index,lowLevelAction)
         return lowLevelAction
 
@@ -473,6 +492,9 @@ class MixedAgent(CaptureAgent):
             if (self.red and myPos[0] < pos[0]) or (not self.red and myPos[0] > pos[0]):
                 states.append(("further_back",))
 
+        my_closest_enemy = float("inf")
+        teammate_closest_enemy = float("inf")
+
         # Collect enemy agents states
         enemies: List[Tuple[int, AgentState]] = [
             (i, gameState.getAgentState(i)) for i in self.getOpponents(gameState)
@@ -515,7 +537,16 @@ class MixedAgent(CaptureAgent):
             if my_distance <= teammate_distance:
                 states.append(("closer_to_enemy", enemy_object))
 
+            if my_distance < my_closest_enemy:
+                my_closest_enemy = my_distance
+            if teammate_distance < teammate_closest_enemy:
+                teammate_closest_enemy = teammate_distance
+
             typeIndex += 1
+
+        # Check if we're closer to our closest enemy than teammate
+        if my_closest_enemy < teammate_closest_enemy:
+            states.append(("closer_to_closest_enemy",))
 
         return objects, states
 
@@ -600,14 +631,18 @@ class MixedAgent(CaptureAgent):
 
         # ==================== PACMAN LOGIC ====================
         if is_pacman:
-            # Priority 0: No food available - escape immediately to score carried food
+            # Priority -1: No food available - escape immediately to score carried food
             if not ("food_available",) in initState:
+                if self.debug:
+                    print(f"Agent {self.index}: Pacman - priority -1")
                 return self.goalEscape(objects, initState)
 
             if is_scared:
-                return self.goalAttack(objects, initState)
+                if self.debug:
+                    print(f"Agent {self.index}: Pacman - priority -0.5")
+                return self.goalEatFood(objects, initState)
 
-            # Priority 1: If both are pacman and enemy in our territory, handle multiple invaders
+            # Priority 0: If both are pacman and enemy in our territory, handle multiple invaders
             if teammate_is_pacman:
                 # Highest priority: If we're further back and enemy has passed us, intercept immediately
                 if ("further_back",) in initState:
@@ -617,6 +652,10 @@ class MixedAgent(CaptureAgent):
                             enemy_obj,
                         ) in initState:
                             if not (("ally_chasing", enemy_obj) in initState):
+                                if self.debug:
+                                    print(
+                                        f"Agent {self.index}: Pacman - priority 0/0"
+                                    )
                                 return self.goalChase(objects, initState, enemy_obj)
                     for enemy_obj in enemy_objects:
                         if ("enemy_past", enemy_obj) in initState and (
@@ -624,6 +663,10 @@ class MixedAgent(CaptureAgent):
                             enemy_obj,
                         ) in initState:
                             if not (("ally_chasing", enemy_obj) in initState):
+                                if self.debug:
+                                    print(
+                                        f"Agent {self.index}: Pacman - priority 0/1"
+                                    )
                                 return self.goalChase(objects, initState, enemy_obj)
                     for enemy_obj in enemy_objects:
                         if ("enemy_past", enemy_obj) in initState and (
@@ -631,46 +674,61 @@ class MixedAgent(CaptureAgent):
                             enemy_obj,
                         ) in initState:
                             if not (("ally_chasing", enemy_obj) in initState):
+                                if self.debug:
+                                    print(
+                                        f"Agent {self.index}: Pacman - priority 0/2"
+                                    )
                                 return self.goalChase(objects, initState, enemy_obj)
                     for enemy_obj in enemy_objects:
                         if ("enemy_past", enemy_obj) in initState:
                             if not (("ally_chasing", enemy_obj) in initState):
+                                if self.debug:
+                                    print(
+                                        f"Agent {self.index}: Pacman - priority 0/3"
+                                    )
                                 return self.goalChase(objects, initState, enemy_obj)
 
             # Priority 1: Eat capsule if we're closest
             if ("closest_to_capsule",) in initState:
                 for enemy_obj in enemy_objects:
                     if not (("is_scared", enemy_obj) in initState):
+                        if self.debug:
+                            print(f"Agent {self.index}: Pacman - priority 1")
                         return self.goalEatCapsule(objects, initState)
 
             # Priority 2: Don't have enough food to take lead - keep eating
-            elif not (("fat_agent", myObj) in initState):
+            if not (("fat_agent", myObj) in initState):
+                if self.debug:
+                    print(f"Agent {self.index}: Pacman - priority 2")
                 return self.goalEatFood(objects, initState)
 
             # Priority 3: Have enough food to take lead and there is no food nearby - escape
-            elif ("fat_agent_gt10", myObj) in initState and not (
+            if ("fat_agent_gt10", myObj) in initState or not (
                 "near_food",
                 myObj,
             ) in initState:
-                return self.goalEscape(objects, initState)
-
-            # Priority 3: Have enough for >10 point lead - escape
-            elif ("fat_agent_gt10", myObj) in initState:
+                if self.debug:
+                    print(f"Agent {self.index}: Pacman - priority 3")
                 return self.goalEscape(objects, initState)
 
             # Priority 4: Not under threat and timer high - keep eating
-            elif not ("enemy_close_distance",) in initState:
+            if not ("enemy_close_distance",) in initState:
+                if self.debug:
+                    print(f"Agent {self.index}: Pacman - priority 4")
                 return self.goalEatFood(objects, initState)
 
             # Priority 5: Have enough for lead - escape
-            else:
-                return self.goalEscape(objects, initState)
+            if self.debug:
+                print(f"Agent {self.index}: Pacman - priority 5")
+            return self.goalEscape(objects, initState)
 
         # ==================== GHOST LOGIC ====================
 
         # Priority 1: If scared, attack
         if is_scared:
-            return self.goalAttack(objects, initState)
+            if self.debug:
+                print(f"Agent {self.index}: Ghost - priority 1")
+            return self.goalEatFood(objects, initState)
 
         # Get enemy objects for chase goals
         enemy_objects = [obj[0] for obj in objects if obj[1] in ["enemy1", "enemy2"]]
@@ -682,28 +740,38 @@ class MixedAgent(CaptureAgent):
                     not (("ally_chasing", enemy_obj) in initState)
                     and ("closer_to_enemy", enemy_obj) in initState
                 ):
+                    if self.debug:
+                        print(f"Agent {self.index}: Ghost - priority 2/0")
                     return self.goalChase(objects, initState, enemy_obj)
-            elif ("fat_agent_gt3", enemy_obj) in initState:
+            if ("fat_agent_gt3", enemy_obj) in initState:
                 if (
                     not (("ally_chasing", enemy_obj) in initState)
                     and ("closer_to_enemy", enemy_obj) in initState
                 ):
+                    if self.debug:
+                        print(f"Agent {self.index}: Ghost - priority 2/1")
                     return self.goalChase(objects, initState, enemy_obj)
-            elif ("fat_agent", enemy_obj) in initState:
+            if ("fat_agent", enemy_obj) in initState:
                 if (
                     not (("ally_chasing", enemy_obj) in initState)
                     and ("closer_to_enemy", enemy_obj) in initState
                 ):
+                    if self.debug:
+                        print(f"Agent {self.index}: Ghost - priority 2/2")
                     return self.goalChase(objects, initState, enemy_obj)
-            elif ("is_pacman", enemy_obj) in initState:
+            if ("is_pacman", enemy_obj) in initState:
                 if (
                     not (("ally_chasing", enemy_obj) in initState)
                     and ("closer_to_enemy", enemy_obj) in initState
                 ):
+                    if self.debug:
+                        print(f"Agent {self.index}: Ghost - priority 2/3")
                     return self.goalChase(objects, initState, enemy_obj)
 
         # Priority 3: Winning by >3, defend
         if ("winning_gt3",) in initState:
+            if self.debug:
+                print(f"Agent {self.index}: Ghost - priority 3")
             return self.goalDefaultDefend(objects, initState)
 
         # Priority 4: Teammate is chasing, we should attack
@@ -712,24 +780,28 @@ class MixedAgent(CaptureAgent):
             ("ally_chasing", eobj) in initState for eobj in enemy_objects
         )
         if ally_is_chasing:
-            return self.goalAttack(objects, initState)
+            if self.debug:
+                print(f"Agent {self.index}: Ghost - priority 4")
+            return self.goalEatFood(objects, initState)
 
         # Priority 5: Not winning, attack
         if ("winning",) not in initState:
-            teammateAction = MixedAgent.CURRENT_ACTION.get((self.index + 2) % 4)
-            if not teammateAction or teammateAction.name not in [
-                "attack",
-                "eat_food",
-                "eat_capsule",
-                "escape",
-            ]:
-                return self.goalAttack(objects, initState)
+            if ("is_pacman", teammateObj) not in initState and (
+                "closer_to_closest_enemy",
+            ) not in initState:
+                if self.debug:
+                    print(f"Agent {self.index}: Ghost - priority 5")
+                return self.goalEatFood(objects, initState)
 
         # Priority 6: Losing by >3, attack
         if ("losing_gt3",) in initState:
-            return self.goalAttack(objects, initState)
+            if self.debug:
+                print(f"Agent {self.index}: Ghost - priority 6")
+            return self.goalEatFood(objects, initState)
 
         # Priority 7: Default - defend
+        if self.debug:
+            print(f"Agent {self.index}: Ghost - priority 7")
         return self.goalDefaultDefend(objects, initState)
 
     def goalEatCapsule(self, objects: List[Tuple], initState: List[Tuple]):
@@ -751,10 +823,6 @@ class MixedAgent(CaptureAgent):
     def goalEscape(self, objects: List[Tuple], initState: List[Tuple]):
         myObj = f"a{self.index}"
         return [], [("is_pacman", myObj)]
-
-    def goalAttack(self, objects: List[Tuple], initState: List[Tuple]):
-        myObj = f"a{self.index}"
-        return [("is_pacman", myObj)], []
 
     def goalChase(self, objects: List[Tuple], initState: List[Tuple], enemy_obj):
         return [], [("is_pacman", enemy_obj)]
@@ -952,7 +1020,7 @@ class MixedAgent(CaptureAgent):
             # This likely means they got eaten and respawned at start position
             if (
                 estimated_pos is not None
-                and real_pos is None
+                and (real_pos is None or real_pos == enemy_start_pos)
                 and self.getMazeDistance(myPos, estimated_pos) <= BREATHING_DISTANCE
             ):
                 # Enemy likely got eaten, use their start position
@@ -978,6 +1046,36 @@ class MixedAgent(CaptureAgent):
         )
 
     # ==================== Shared Helper Functions ====================
+
+    def getConsecutiveStopReversePenalty(self):
+        count = MixedAgent.CONSECUTIVE_STOP_REVERSE.get(self.index, 0)
+        return 2**count
+
+    def getDeathDistanceGhosts(self, myPos, enemyVirtualStates: Dict[int, AgentState]):
+        count = 0
+        for enemy_idx, enemy_state in enemyVirtualStates.items():
+            if not enemy_state.isPacman and enemy_state.scaredTimer == 0:
+                enemy_pos = enemy_state.getPosition()
+                if enemy_pos:
+                    dist = self.getMazeDistance(myPos, enemy_pos)
+                    if dist <= DEATH_DISTANCE:
+                        count += 1
+        return count
+
+    def getDeathDistancePacman(
+        self, myState, enemyVirtualStates: Dict[int, AgentState]
+    ):
+        count = 0
+        myPos = myState.getPosition()
+        is_scared = myState.scaredTimer > 0
+        if is_scared:
+            for enemy_idx, enemy_state in enemyVirtualStates.items():
+                if enemy_state.isPacman:
+                    enemy_pos = enemy_state.getPosition()
+                    dist = self.getMazeDistance(myPos, enemy_pos)
+                    if dist <= DEATH_DISTANCE:
+                        count += 1
+        return count
 
     def getBreathingDistanceGhosts(
         self, myPos, enemyVirtualStates: Dict[int, AgentState]
@@ -1005,12 +1103,28 @@ class MixedAgent(CaptureAgent):
                         count += 1
         return count
 
-    def getGotEaten(self, nextPos):
+    def getGotEaten(self, agentState: AgentState, enemyVirtualStates):
         """
         Check if agent got eaten (sent back to start position).
         Returns 1.0 if eaten, 0.0 otherwise.
         """
-        return 1.0 if nextPos == self.startPosition else 0.0
+        nextPos = agentState.getPosition()
+        if nextPos == self.startPosition:
+            return 1.0
+
+        # Check if we're within DEATH_DISTANCE of any enemy ghost
+        if agentState.isPacman:
+            count = self.getDeathDistanceGhosts(nextPos, enemyVirtualStates)
+            if count > 0:
+                return 1.0
+
+        # Check if we're within DEATH_DISTANCE of any enemy Pacman
+        if not agentState.isPacman:
+            count = self.getDeathDistancePacman(agentState, enemyVirtualStates)
+            if count > 0:
+                return 1.0
+
+        return 0.0
 
     def getDistanceToHome(self, pos, gameState: GameState):
         """Get maze distance to home territory border"""
@@ -1153,13 +1267,17 @@ class MixedAgent(CaptureAgent):
         """
         min_dist = float("inf")
         def_dist = float("inf")
+        teammate_assignment = MixedAgent.DEFENSIVE_ASSIGNMENTS[(self.index + 2) % 4]
         for enemy_idx, enemy_state in enemyVirtualStates.items():
+            if defendMode and (teammate_assignment == enemy_idx):
+                continue
             enemy_pos = enemy_state.getPosition()
             assert enemy_pos
             dist = self.getMazeDistance(myPos, enemy_pos)
             if dist < min_dist:
                 min_dist = dist
                 if defendMode:
+                    MixedAgent.DEFENSIVE_ASSIGNMENTS[self.index] = enemy_idx
                     assert gameState
                     # For defense: use defensive distancer to avoid local minima at border
                     def_dist = self.getDefensiveMazeDistance(
@@ -1263,13 +1381,15 @@ class MixedAgent(CaptureAgent):
         )
 
         # Penalty: Getting eaten
-        features["got-eaten"] = self.getGotEaten(nextPos)
+        features["got-eaten"] = self.getGotEaten(
+            nextStateInfo.agentState, nextStateInfo.enemyVirtualStates
+        )
 
-        # Tie-breaking: Penalize stop and reverse
-        features["stop"] = 1.0 if action == Directions.STOP else 0.0
-        features["reverse"] = (
-            1.0
-            if action
+        exponential_penalty = self.getConsecutiveStopReversePenalty()
+        features["stop-reverse"] = (
+            exponential_penalty
+            if action == Directions.STOP
+            or action
             == Directions.REVERSE[stateInfo.agentState.configuration.direction]
             else 0.0
         )
@@ -1317,13 +1437,15 @@ class MixedAgent(CaptureAgent):
         ] = self.getDistanceToAttackingTeammate(nextPos, nextStateInfo.teammateState)
 
         # Penalty: Getting eaten
-        features["got-eaten"] = self.getGotEaten(nextPos)
+        features["got-eaten"] = self.getGotEaten(
+            nextStateInfo.agentState, nextStateInfo.enemyVirtualStates
+        )
 
-        # Tie-breaking: Penalize stop and reverse
-        features["stop"] = 1.0 if action == Directions.STOP else 0.0
-        features["reverse"] = (
-            1.0
-            if action
+        exponential_penalty = self.getConsecutiveStopReversePenalty()
+        features["stop-reverse"] = (
+            exponential_penalty
+            if action == Directions.STOP
+            or action
             == Directions.REVERSE[stateInfo.agentState.configuration.direction]
             else 0.0
         )
@@ -1373,13 +1495,15 @@ class MixedAgent(CaptureAgent):
         # )
 
         # Penalty: Getting eaten
-        features["got-eaten"] = self.getGotEaten(nextPos)
+        features["got-eaten"] = self.getGotEaten(
+            nextStateInfo.agentState, nextStateInfo.enemyVirtualStates
+        )
 
-        # Tie-breaking: Penalize stop and reverse
-        features["stop"] = 1.0 if action == Directions.STOP else 0.0
-        features["reverse"] = (
-            1.0
-            if action
+        exponential_penalty = self.getConsecutiveStopReversePenalty()
+        features["stop-reverse"] = (
+            exponential_penalty
+            if action == Directions.STOP
+            or action
             == Directions.REVERSE[stateInfo.agentState.configuration.direction]
             else 0.0
         )
@@ -1413,13 +1537,16 @@ class MixedAgent(CaptureAgent):
         )
 
         # Penalty: Getting eaten
-        features["got-eaten"] = self.getGotEaten(nextPos)
+        features["got-eaten"] = self.getGotEaten(
+            nextStateInfo.agentState, nextStateInfo.enemyVirtualStates
+        )
 
         # Tie-breaking: Penalize stop and reverse
-        features["stop"] = 1.0 if action == Directions.STOP else 0.0
-        features["reverse"] = (
-            1.0
-            if action
+        exponential_penalty = self.getConsecutiveStopReversePenalty()
+        features["stop-reverse"] = (
+            exponential_penalty
+            if action == Directions.STOP
+            or action
             == Directions.REVERSE[stateInfo.agentState.configuration.direction]
             else 0.0
         )
@@ -1470,13 +1597,16 @@ class MixedAgent(CaptureAgent):
         )
 
         # Penalty: Getting eaten (shouldn't happen while defending, but just in case)
-        features["got-eaten"] = self.getGotEaten(nextPos)
+        features["got-eaten"] = self.getGotEaten(
+            nextStateInfo.agentState, nextStateInfo.enemyVirtualStates
+        )
 
         # Tie-breaking: Penalize stop and reverse
-        features["stop"] = 1.0 if action == Directions.STOP else 0.0
-        features["reverse"] = (
-            1.0
-            if action
+        exponential_penalty = self.getConsecutiveStopReversePenalty()
+        features["stop-reverse"] = (
+            exponential_penalty
+            if action == Directions.STOP
+            or action
             == Directions.REVERSE[stateInfo.agentState.configuration.direction]
             else 0.0
         )
@@ -1513,23 +1643,26 @@ class MixedAgent(CaptureAgent):
         )
 
         # Check if we're both defending
-        current_action = MixedAgent.CURRENT_ACTION.get((self.index + 2) % 4)
-        if hasattr(current_action, "name") and current_action.name == "defend":
-            features[
-                "distance-to-teammate-both-defending"
-            ] = self.getDistanceToTeammate(nextPos, nextStateInfo.teammateState)
+        # current_action = MixedAgent.CURRENT_ACTION.get((self.index + 2) % 4)
+        # if hasattr(current_action, "name") and current_action.name == "defend":
+        #     features[
+        #         "distance-to-teammate-both-defending"
+        #     ] = self.getDistanceToTeammate(nextPos, nextStateInfo.teammateState)
 
         # Penalty: Getting eaten (shouldn't happen while defending, but just in case)
-        features["got-eaten"] = self.getGotEaten(nextPos)
+        features["got-eaten"] = self.getGotEaten(
+            nextStateInfo.agentState, nextStateInfo.enemyVirtualStates
+        )
 
         # Tie-breaking: Penalize stop and reverse
-        features["stop"] = 1.0 if action == Directions.STOP else 0.0
-        features["reverse"] = (
-            1.0
-            if action
-            == Directions.REVERSE[stateInfo.agentState.configuration.direction]
-            else 0.0
-        )
+        # exponential_penalty = self.getConsecutiveStopReversePenalty()
+        # features["stop-reverse"] = (
+        #     exponential_penalty
+        #     if action == Directions.STOP
+        #     or action
+        #     == Directions.REVERSE[stateInfo.agentState.configuration.direction]
+        #     else 0.0
+        # )
 
         return features
 
