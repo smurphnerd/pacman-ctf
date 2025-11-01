@@ -2703,7 +2703,7 @@ def offensive_heuristic(domain: MixedAgent, current_state, goal_state):
                for g_state in goal_state)
     inter_time = current_state[-1]
     if inter_time >= 0:
-        dist += 99999 - inter_time
+        dist += 99999999 - inter_time * 500
     return dist
 
 from collections.abc import Iterable
