@@ -783,6 +783,9 @@ def readCommand( argv ):
   parser.add_option('-l', '--layout', dest='layout',
                     help=default('the LAYOUT_FILE from which to load the map layout; use RANDOM for a random maze; use RANDOM<seed> to use a specified random seed, e.g., RANDOM23'),
                     metavar='LAYOUT_FILE', default='defaultCapture')
+  parser.add_option('--layouts', dest='layouts',
+                    help='Comma-separated list of layout files to rotate through for multiple games (e.g., "strategicCapture,officeCapture")',
+                    metavar='LAYOUT_FILES', default=None)
   parser.add_option('-t', '--textgraphics', action='store_true', dest='textgraphics',
                     help='Display output as text only', default=False)
 
@@ -881,18 +884,31 @@ def readCommand( argv ):
   # Choose a layout
   import layout
   layouts = []
-  for i in range(options.numGames):
-    if options.layout == 'RANDOM':
-      l = layout.Layout(randomLayout().split('\n'))
-    elif options.layout.startswith('RANDOM'):
-      l = layout.Layout(randomLayout(int(options.layout[6:])).split('\n'))
-    elif options.layout.lower().find('capture') == -1:
-      raise Exception( 'You must use a capture layout with capture.py')
-    else:
-      l = layout.getLayout( options.layout )
-    if l == None: raise Exception("The layout " + options.layout + " cannot be found")
-    
-    layouts.append(l)
+
+  # If multiple layouts specified, use them in rotation
+  if options.layouts is not None:
+    layout_names = [name.strip() for name in options.layouts.split(',')]
+    for i in range(options.numGames):
+      layout_name = layout_names[i % len(layout_names)]
+      if layout_name.lower().find('capture') == -1:
+        raise Exception( 'You must use a capture layout with capture.py')
+      l = layout.getLayout(layout_name)
+      if l == None: raise Exception("The layout " + layout_name + " cannot be found")
+      layouts.append(l)
+  else:
+    # Original single layout logic
+    for i in range(options.numGames):
+      if options.layout == 'RANDOM':
+        l = layout.Layout(randomLayout().split('\n'))
+      elif options.layout.startswith('RANDOM'):
+        l = layout.Layout(randomLayout(int(options.layout[6:])).split('\n'))
+      elif options.layout.lower().find('capture') == -1:
+        raise Exception( 'You must use a capture layout with capture.py')
+      else:
+        l = layout.getLayout( options.layout )
+      if l == None: raise Exception("The layout " + options.layout + " cannot be found")
+
+      layouts.append(l)
     
   args['layouts'] = layouts
   args['length'] = options.time

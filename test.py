@@ -1,66 +1,11 @@
-import logging
+import base64, pickle
+from layout import Layout
 
-import coloredlogs
+txt = "gASVaA0AAAAAAACPlChY+gEAACUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlCiUxJSAgLiUuJS4lICAgJS4lICAgICAgJS4lJSUgICAgICUgICAlCiUzJSAlLiUgJSAgICAgICAgICAlJSUgJSAgICAgJSAlICUgJSAlCiUgJSAlICUgICAlJSUgJSUlICUlICAgICAlJSUlJSAlLiUgJSAlCiUgJSAlICUgJSAlLiUgIC4lLiUgICUlJSAlICAgICAlLiUgJSAlCiUgJSAlICUgJSAlICUgJSUlJSUgICUuJSAgICUlJSAlJSUgJSAlCiUgJSAlICAgJS4lICUgJSAgICAgICAgJSAlICUuJSAgICUgJSAlCiUgJSAlJSUgJSUlICAgJS4lICAlJSUlJSAlICUgJSAlICUgJSAlCiUgJSAlLiUgICAgICUgJSUlICAlLiUuICAlLiUgJSAlICUgJSAlCiUgJSAlLiUgJSUlJSUgICAgICUlICUlJSAlJSUgICAlICUgJSAlCiUgJSAlICUgJSAgICAgJSAlJSUgICAgICAgICAgJSAlLiUgJTQlCiUgICAlICAgICAlJSUuJSAgICAgICUuJSAgICUuJS4lLiAgJTIlCiUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUllFgPAgAAJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUKJSAgICUuICUuJS4lICAgICAgICUgICAgICUuJS4lNCUKJSAlICUlICAgICAgICUlICAlICAgJSUlICAgJS4lMiUKJSAlICUuICUgJSUlICAgICUlJSUgLiUuLiUgJSAlICUKJSAlICUlICUgLi4lICUgICAlICAgJSUlJSUgJSAlICUKJSAlICAgICUlJSUlICUlJSAgICUlJS4lIG8gJSAlICUKJSAlJSAlIC4uJS4gICUuJSUlICAgICAgICUgICAlICUKJSAlLiAlJS4lJSUlICAgICAgICAlLiUlJSUgICUlICUKJSAlJSAgJSUlJS4lICAgICAgICAlJSUlLiUlIC4lICUKJSAlICAgJSAgICAgICAlJSUuJSAgLiUuLiAlICUlICUKJSAlICUgbyAlLiUlJSAgICUlJSAlJSUlJSAgICAlICUKJSAlICUgJSUlJSUgICAlICAgJSAlLi4gJSAlJSAlICUKJSAlICUgJS4uJS4gJSUlJSAgICAlJSUgJSAuJSAlICUKJTElLiUgICAlJSUgICAlICAlJSAgICAgICAlJSAlICUKJTMlLiUuJSAgICAgJSAgICAgICAlLiUuJSAuJSAgICUKJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSWUWAUCAAAlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUKJSAgICAgICAgICAgICAgIDMlJTIgICAgICAgICAgICAgICAlCiUgJSUlJSUlJSUlJSUlJSUgJSUlJSUlJSUlJSUlJSUlJSUgJQolICUuLi4uLi4uLi4gICAlICAgLi4uLi4uLi4uLi4uLi4lICUKJSAlLi4uLi4uLi4gICUuJSUlJSUlJSUuJSUlICUlLiUlJSAlCiUgJSUlJS4lJSUlJSAlLi4uICAuJS4uLi4uJSAlLi4uLiUgJQolICAuLi4uJTUlJSUuJSUlLiAgLi4uLi4uLiUgJS4uLi4gICUKJSAgLi4uLiUgJS4uLi4uLi4gIC4lJSUuJSUlNiUuLi4uICAlCiUgJS4uLi4lICUuLi4uLiUuICAuLi4lICUlJSUlLiUlJSUgJQolICUlJSAlJSAlJSUuJSUlJSUlJSUuJSAgLi4uLi4uLi4lICUKJSAlLi4uLi4uLi4uLi4uLi4gICAlICAgLi4uLi4uLi4uJSAlCiUgJSUlJSUlJSUlJSUlJSUlJSUgJSUlJSUlJSUlJSUlJSUgJQolICAgICAgICAgICAgICAgMSUlNCAgICAgICAgICAgICAgICUKJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUllFg6AQAAJSUlJSUlJSUlJSUlJSUlJSUlJSUKJS4uLi4lLi4uICAuLi4lLi4uLiUKJS4lJS4lLiUlICAlJS4lLiUlLiUKJS4lLi4uLiAgICAgIC4uLi4lLiUKJS4lJS4lLiUlJSUlJS4lLiUlLiUKJS4uLi4uLiAgICAgIC4uLi4uLiUKJS4lJS4uLiUlICAlJS4uLiUlLiUKJS4lLi4lLi4uICAuLi4lLi4lLiUKJS4lJS4lLiUlJSUlJS4lLiUlLiUKJS4uLi4uLiAgICAgIC4uLi4uLiUKJSAlJSUlJSUlJSUlJSUlJSUlICUKJSAgICAgICAxJSUyICAgICAgICUKJSUlJSUlICUlJSUlJSAlJSUlJSUKJSUlJSUlICAzJSU0ICAlJSUlJSUKJSUlJSUlJSUlJSUlJSUlJSUlJSWUWEkBAAAlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJQolICAgJS4lJS4lICAgJSAgICAgICAgICAgJS4lLiU0JQolICUgJSAgICAgICUgICAgJSUlJSAlJSUgICAlLiUyJQolICUgJSAlICAlJSUgJSAgICAgICAuJS4uJSAgICUgJQolICUgJSAlICAuLiUgJS4lJSUlICUlJSUlJSAlICUgJQolICUgJSAlJSUlJSUgJSUlJS4lICUuLiAgJSAlICUgJQolICUgICAlLi4lLiAgICAgICAlICUlJSAgJSAlICUgJQolMSUuJSAgICUlJSAlJSUlICAgICUgICAgICAlICUgJQolMyUuJS4lICAgICAgICAgICAlICAgJS4lJS4lICAgJQolJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJZRYLQMAACUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJQolICAgICAgICAgICAgICAgMyUlMiAgICAgICAgICAgICAgICUKJSAlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSAlCiUgJS4uLi4uLi4uJS4uLi4uJSUuLi4uLiUuLi4uLi4uLiUgJQolICUuLi4uLi4uLiUuLi4uLiUlLi4uLi4lLi4uLi4uLi4lICUKJSAlLi4uLi4uLi4lJSUuJSUlJSUlLiUlJSUlLiUlJSUlJSAlCiUgIC4uLi4uLi4uLiAgICAgICAgICAgICAgICAgICAgICAgJQolJSUuLi4uLi4uLiUgJSUlJSUlICUlJS4lJSUgJSUuJSUlJSUKJSUlJSUlJSUuJSUlICUlJSUlJSAlLi4uLi4lICUuLi4uLi4lCiUuLi4uLi4uICAgICAgICAgJSUgJS4uLi4uJSAlLi4uLi4uJQolLi4uLi4uJSAlJSUuJSUlICAgICUuLi4uLiUgJS4uLi4uLiUKJS4uLi4uLiUgJS4uLi4uJSAgICAlJSUuJSUlICUuLi4uLi4lCiUuLi4uLi4lICUuLi4uLiUgJSUgICAgICAgICAuLi4uLi4uJQolLi4uLi4uJSAlLi4uLi4lICUlJSUlJSAlJSUuJSUlJSUlJSUKJSUlJSUgJSUgJSUlLiUlJSAlJSUlJSUgJS4uLi4uLi4uJSUlCiUgICAgICAgICAgICAgICAgICAgICAgIC4uLi4uLi4uLiAgJQolICUlJSUlJS4lJSUlJS4lJSUlJSUuJSUlLi4uLi4uLi4lICUKJSAlLi4uLi4uLi4lLi4uLi4lJS4uLi4uJS4uLi4uLi4uJSAlCiUgJS4uLi4uLi4uJS4uLi4uJSUuLi4uLiUuLi4uLi4uLiUgJQolICUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlICUKJSAgICAgICAgICAgICAgIDElJTQgICAgICAgICAgICAgICAlCiUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJZRYewEAACUlJSUlJSUlJSUlJSUlJSUlJQolMSUlJSUlJSUlJSUlJSUlMiUKJSAlLi4uLi4gIC4uLi4uJSAlCiUgJS4uLi4uICAuLi4uLiUgJQolICUuJSAlJSUlJSUgJS4lICUKJSAlLiUgIC4gIC4gICUuJSAlCiUgJS4lIC4lJSUlLiAlLiUgJQolICUgJSAuICAgIC4gJSAlICUKJSAgLi4gJS4lJS4lIC4uICAlCiUlJSUgICUuJSUuJSAgJSUlJQolJSUlICAlLiUlLiUgICUlJSUKJSAgLi4gJS4lJS4lIC4uICAlCiUgJSAlICAgICAgICAlICUgJQolICUuJSAlJSUlJSUgJS4lICUKJSAlLiUgJS4gIC4lICUuJSAlCiUgJS4uLi4uICAuLi4uLiUgJQolICUuJSUgJSAgJSAlJS4lICUKJSAlICUlICUgICUgJSUgJSAlCiUzJS4uLi4gICAgLi4uLiU0JQolJSUlJSUlJSUlJSUlJSUlJSWUkC4="
 
-from Coach import Coach
-from PacmanGame import PacmanGame as Game
-from PacmanNeuralNet import PacmanNeuralNet as nn
-from utils import *
+base64_bytes = txt.encode("ascii")
+message_bytes = base64.b64decode(base64_bytes)
+obj = pickle.loads(message_bytes)
 
-log = logging.getLogger(__name__)
-
-coloredlogs.install(level="INFO")  # Change this to DEBUG to see more info.
-
-args = dotdict(
-    {
-        "numIters": 1,
-        "numEps": 10,  # Number of complete self-play games to simulate during a new iteration.
-        "tempThreshold": 15,  #
-        "updateThreshold": 0.55,  # During arena playoff, new neural net will be accepted if threshold or more of games are won.
-        "maxlenOfQueue": 200000,  # Number of game examples to train the neural networks.
-        "numMCTSSims": 5,  # Number of games moves for MCTS to simulate.
-        "arenaCompare": 5,  # Number of games to play during arena play to determine if new net will be accepted.
-        "cpuct": 1,
-        "checkpoint": "./temp/",
-        "load_model": True,
-        "load_folder_file": ("./checkpoint", "expert_data.pth.tar"),
-        "numItersForTrainExamplesHistory": 20,
-        "lr": 1e-3,
-        "weight_decay": 0,
-        "epochs": 100,
-        "batch_size": 64,
-        "bootstrap_iterations": 0,
-        "filter_winning_only": True,
-    }
-)
-
-
-def main():
-    log.info("Loading %s...", Game.__name__)
-    g = Game(layout_name="mediumCapture")
-
-    log.info("Loading %s...", nn.__name__)
-    nnet = nn(g, args)
-
-    if args.load_model:
-        log.info(
-            'Loading checkpoint "%s/%s"...',
-            args.load_folder_file[0],
-            args.load_folder_file[1],
-        )
-        nnet.load_checkpoint(args.load_folder_file[0], args.load_folder_file[1])
-    else:
-        log.warning("Not loading a checkpoint!")
-
-    log.info("Loading the Coach...")
-    c = Coach(g, nnet, args)
-
-    if args.load_model:
-        log.info("Loading 'trainExamples' from file...")
-        c.loadTrainExamples()
-
-    c.learn()
-
-
-if __name__ == "__main__":
-    main()
+for layout in obj:
+    print(layout)

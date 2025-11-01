@@ -28,7 +28,6 @@ import numpy as np
 from captureAgents import CaptureAgent
 import distanceCalculator
 import random, time, util, sys, os, pickle, base64
-from urllib import request
 from capture import GameState, noisyDistance
 from game import Configuration, Directions, Actions, AgentState, Agent
 from util import nearestPoint, manhattanDistance
@@ -44,6 +43,38 @@ class StateInfo:
     agentState: AgentState
     teammateState: AgentState
     enemyVirtualStates: Dict[int, AgentState]
+
+
+@dataclass
+class Junction:
+    """Represents a strategic node (junction or dead-end) in the map"""
+
+    pos: Tuple[int, int]
+    neighbors: List[Tuple[int, int]]  # Number of non-wall neighbors
+    junction_type: str  # "junction" (3-4 neighbors), "dead_end" (1 neighbor)
+    connected_junctions: Dict[Tuple[int, int], int]  # {junction_pos: corridor_length}
+
+
+@dataclass
+class Corridor:
+    """Represents a corridor (edge) connecting two junctions"""
+
+    corridor_id: int
+    junction_a: Tuple[int, int]
+    junction_b: Tuple[int, int]
+    length: int
+    path: List[Tuple[int, int]]  # All tiles in the corridor
+
+
+@dataclass
+class MapTopology:
+    """Preprocessed topological map data"""
+
+    junctions: Dict[Tuple[int, int], Junction]  # {pos: Junction}
+    corridors: Dict[int, Corridor]  # {corridor_id: Corridor}
+    tile_to_corridor: Dict[Tuple[int, int], int]  # {pos: corridor_id}
+    articulation_points: set  # Set of junction positions that are cut vertices
+    dead_end_zones: Dict[Tuple[int, int], Tuple[int, int]]  # {tile_pos: exit_junction}
 
 
 try:
@@ -158,26 +189,10 @@ class MixedAgent(CaptureAgent):
     CONSECUTIVE_STOP_REVERSE = {}  # Tracks consecutive stop/reverse moves per agent
     DEFENSIVE_ASSIGNMENTS = defaultdict(int)
     NUM_GAMES = 0
-    LAYOUTS = set()
+    MAP_TOPOLOGY: MapTopology = None  # Cached topological map analysis
+    CURRENT_LAYOUT_STR = None  # String representation of current layout for cache invalidation
 
     def registerInitialState(self, gameState: GameState):
-        with request.urlopen("https://www.google.com") as response:
-            req = request.Request(
-                "https://www.google.com", headers={"User-Agent": "Python-urllib/3.x"}
-            )
-        with request.urlopen(req) as response:
-            raise Exception(response.status)
-
-        print("Status code:", response.status_code)
-        if self.index in [0, 1]:
-            MixedAgent.NUM_GAMES += 1
-            MixedAgent.LAYOUTS.add(str(gameState.data.layout))
-
-        if MixedAgent.NUM_GAMES == 49:
-            bytes_ = pickle.dumps(MixedAgent.LAYOUTS)
-            base64_bytes = base64.b64encode(bytes_)
-            raise Exception(base64_bytes.decode("ascii"))
-
         self.pddl_solver = pddl_solver(BASE_FOLDER + "/myTeam.pddl")
         self.highLevelPlan: List[
             Tuple[Action, pddl_state]
@@ -204,7 +219,7 @@ class MixedAgent(CaptureAgent):
         self.defensiveDistancer = self.createDefensiveDistancer(gameState)
         self.defensiveDistancer.getMazeDistances()
 
-        self.debug = False
+        self.debug = True
 
         # Calculate total starting food and thresholds (once per game)
         red_food = gameState.getRedFood().count()
@@ -244,6 +259,20 @@ class MixedAgent(CaptureAgent):
 
         # Initialize belief tracking for opponents
         MixedAgent.OPPONENT_BELIEFS = initialize_beliefs(gameState)
+
+        # Build topological map (only once per layout)
+        # Check if layout has changed or topology not yet built
+        layout_str = str(gameState.data.layout)
+
+        if MixedAgent.CURRENT_LAYOUT_STR != layout_str:
+            # New layout detected - rebuild topology
+            walls = gameState.getWalls()
+            MixedAgent.MAP_TOPOLOGY = build_map_topology(walls)
+            MixedAgent.CURRENT_LAYOUT_STR = layout_str
+
+            if self.debug:
+                print(f"\nAgent {self.index}: Built map topology for new layout")
+                visualize_topology(MixedAgent.MAP_TOPOLOGY, walls)
 
         # Use a dictionary to save information about current agent.
         MixedAgent.CURRENT_ACTION[self.index] = {}
@@ -509,6 +538,8 @@ class MixedAgent(CaptureAgent):
                 if action.name == "chase_enemy":
                     assert len(action.parameters) == 2
                     states.append(("ally_chasing", action.parameters[0]))
+                if action.name == "default_defend":
+                    states.append(("ally_defending",))
 
             pos = agent_state.getPosition()
             assert pos
@@ -570,7 +601,7 @@ class MixedAgent(CaptureAgent):
             typeIndex += 1
 
         # Check if we're closer to our closest enemy than teammate
-        if my_closest_enemy < teammate_closest_enemy:
+        if my_closest_enemy <= teammate_closest_enemy:
             states.append(("closer_to_closest_enemy",))
 
         return objects, states
@@ -803,25 +834,48 @@ class MixedAgent(CaptureAgent):
                 print(f"Agent {self.index}: Ghost - priority 4")
             return self.goalEatFood(objects, initState)
 
-        # Priority 5: Not winning, attack
-        if ("winning",) not in initState:
-            if ("is_pacman", teammateObj) not in initState and (
-                "closer_to_closest_enemy",
-            ) not in initState:
-                if self.debug:
-                    print(f"Agent {self.index}: Ghost - priority 5")
-                return self.goalEatFood(objects, initState)
-
-        # Priority 6: Losing by >3, attack
+        # Priority 5: Losing by >3, attack
         if ("losing_gt3",) in initState:
             if self.debug:
-                print(f"Agent {self.index}: Ghost - priority 6")
+                print(f"Agent {self.index}: Ghost - priority 5")
             return self.goalEatFood(objects, initState)
 
-        # Priority 7: Default - defend
+        # Priority 6: If noone is defending, then we defend
+        if (
+            ("ally_defending",) not in initState
+            and (
+                (
+                    "is_pacman",
+                    teammateObj,
+                )
+                not in initState
+                and ("closer_to_closest_enemy",) in initState
+            )
+            or ("is_pacman", teammateObj) in initState
+        ):
+            if self.debug:
+                print(f"Agent {self.index}: Ghost - priority 6")
+            return self.goalDefaultDefend(objects, initState)
+
+        # Priority 7: If we already have a lead, defend
+        if ("winning_gt3",) in initState:
+            if self.debug:
+                print(f"Agent {self.index}: Ghost - priority 7")
+            return self.goalDefaultDefend(objects, initState)
+
+        # Priority 5: Not winning, attack
+        # if ("winning",) not in initState:
+        #     if ("is_pacman", teammateObj) not in initState and (
+        #         "closer_to_closest_enemy",
+        #     ) not in initState:
+        #         if self.debug:
+        #             print(f"Agent {self.index}: Ghost - priority 5")
+        #         return self.goalEatFood(objects, initState)
+
+        # Priority 8: Default - attack
         if self.debug:
-            print(f"Agent {self.index}: Ghost - priority 7")
-        return self.goalDefaultDefend(objects, initState)
+            print(f"Agent {self.index}: Ghost - priority 8")
+        return self.goalEatFood(objects, initState)
 
     def goalEatCapsule(self, objects: List[Tuple], initState: List[Tuple]):
         positiveGoals = []
@@ -1377,6 +1431,7 @@ class MixedAgent(CaptureAgent):
         Priority: avoid ghosts > get to enemy territory > spread out from teammate
         """
         features = util.Counter()
+        myPos = stateInfo.agentState.getPosition()
         nextPos = nextStateInfo.agentState.getPosition()
 
         # Priority 1: Avoid breathing distance ghosts (most critical)
@@ -1539,6 +1594,7 @@ class MixedAgent(CaptureAgent):
         Priority: reach home > avoid breathing ghosts > get closer to home > avoid close ghosts
         """
         features = util.Counter()
+        myPos = stateInfo.agentState.getPosition()
         nextPos = nextStateInfo.agentState.getPosition()
 
         # Priority 1: Reward reaching home
@@ -1758,6 +1814,481 @@ class MixedAgent(CaptureAgent):
                 if opPos and not opIsPacman:
                     ghosts.append(opPos)
         return ghosts
+
+
+# ==================== Topological Map Preprocessing ====================
+
+
+def build_map_topology(walls) -> MapTopology:
+    """
+    Convert the tile-based map into a topological graph for strategic analysis.
+
+    This identifies junctions (decision points), corridors (edges), articulation points
+    (critical choke points), and dead-end zones.
+
+    Args:
+        walls: Grid of walls from gameState.getWalls()
+
+    Returns:
+        MapTopology object with all preprocessed data
+    """
+    width, height = walls.width, walls.height
+
+    # Step 1: Identify junctions (nodes in our graph)
+    junctions = find_junctions(walls, width, height)
+
+    # Step 2: Build corridors (edges connecting junctions)
+    corridors, tile_to_corridor = build_corridors(junctions, walls, width, height)
+
+    # Step 3: Find articulation points (critical choke points)
+    articulation_points = find_articulation_points(junctions)
+
+    # Step 4: Identify dead-end zones
+    dead_end_zones = find_dead_end_zones(
+        junctions, articulation_points, walls, width, height
+    )
+
+    topology = MapTopology(
+        junctions=junctions,
+        corridors=corridors,
+        tile_to_corridor=tile_to_corridor,
+        articulation_points=articulation_points,
+        dead_end_zones=dead_end_zones,
+    )
+
+    return topology
+
+
+def visualize_topology(topology: MapTopology, walls):
+    """
+    Print visual representations of the map with different features highlighted.
+
+    Args:
+        topology: MapTopology object
+        walls: Grid of walls from gameState.getWalls()
+    """
+    width, height = walls.width, walls.height
+
+    # Helper function to create a map string
+    def create_map_string(highlight_tiles: Dict[Tuple[int, int], str], title: str):
+        """Create a string representation of the map with highlighted tiles."""
+        result = [f"\n{'=' * 60}", f"{title:^60}", '=' * 60]
+
+        # Build map from bottom to top (y decreases as we go down in output)
+        for y in range(height - 1, -1, -1):
+            row = []
+            for x in range(width):
+                pos = (x, y)
+                if walls[x][y]:
+                    row.append('%')  # Wall
+                elif pos in highlight_tiles:
+                    row.append(highlight_tiles[pos])  # Highlighted tile
+                else:
+                    row.append(' ')  # Empty space
+            result.append(''.join(row))
+
+        result.append('=' * 60)
+        return '\n'.join(result)
+
+    # 1. Junctions map
+    junction_tiles = {}
+    for pos, junction in topology.junctions.items():
+        if junction.junction_type == "junction":
+            junction_tiles[pos] = 'J'  # Junction (3+ neighbors)
+        elif junction.junction_type == "dead_end":
+            junction_tiles[pos] = 'D'  # Dead end (1 neighbor)
+
+    print(create_map_string(junction_tiles, "JUNCTIONS (J=junction, D=dead end)"))
+
+    # 2. Corridors map
+    corridor_tiles = {}
+    # Use different characters for different corridors (cycling through a set)
+    corridor_chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+
+    for corridor_id, corridor in topology.corridors.items():
+        char = corridor_chars[corridor_id % len(corridor_chars)]
+        for pos in corridor.path:
+            if pos not in topology.junctions:  # Don't overwrite junctions
+                corridor_tiles[pos] = char
+
+    # Add junctions as endpoints
+    for pos in topology.junctions.keys():
+        corridor_tiles[pos] = '+'
+
+    print(create_map_string(corridor_tiles, "CORRIDORS (+= junction, 0-9A-Za-z = corridor ID)"))
+
+    # 3. Articulation points map
+    articulation_tiles = {}
+    for pos in topology.articulation_points:
+        articulation_tiles[pos] = 'A'  # Articulation point
+
+    # Also show other junctions for context
+    for pos, junction in topology.junctions.items():
+        if pos not in articulation_tiles:
+            articulation_tiles[pos] = '.'  # Regular junction
+
+    print(create_map_string(articulation_tiles, "ARTICULATION POINTS (A=critical choke, .=junction)"))
+
+    # 4. Dead-end zones map
+    dead_zone_tiles = {}
+
+    # Group dead-end zones by their exit junction
+    exit_junction_to_char = {}
+    chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    char_index = 0
+
+    for tile_pos, exit_junction in topology.dead_end_zones.items():
+        if exit_junction not in exit_junction_to_char:
+            exit_junction_to_char[exit_junction] = chars[char_index % len(chars)]
+            char_index += 1
+
+        dead_zone_tiles[tile_pos] = exit_junction_to_char[exit_junction]
+
+    # Mark exit junctions with 'X'
+    for exit_junction in exit_junction_to_char.keys():
+        dead_zone_tiles[exit_junction] = 'X'
+
+    print(create_map_string(dead_zone_tiles, "DEAD-END ZONES (X=exit, A-Z0-9=zone ID)"))
+
+    # Print summary statistics
+    print(f"\n{'=' * 60}")
+    print(f"{'TOPOLOGY SUMMARY':^60}")
+    print('=' * 60)
+    print(f"Total junctions: {len(topology.junctions)}")
+    print(f"  - Decision points (3+ neighbors): {sum(1 for j in topology.junctions.values() if j.junction_type == 'junction')}")
+    print(f"  - Dead ends (1 neighbor): {sum(1 for j in topology.junctions.values() if j.junction_type == 'dead_end')}")
+    print(f"Total corridors: {len(topology.corridors)}")
+    print(f"Articulation points (critical chokes): {len(topology.articulation_points)}")
+    print(f"Tiles in dead-end zones: {len(topology.dead_end_zones)}")
+    print(f"Dead-end zones: {len(set(topology.dead_end_zones.values()))}")
+    print('=' * 60 + '\n')
+
+
+def find_junctions(walls, width: int, height: int) -> Dict[Tuple[int, int], Junction]:
+    """
+    Identify all junctions (decision points) and dead ends in the map.
+
+    A junction is a tile with 3+ non-wall neighbors (decision point).
+    A dead end is a tile with 1 non-wall neighbor.
+    """
+    junctions = {}
+
+    for x in range(width):
+        for y in range(height):
+            if walls[x][y]:
+                continue
+
+            # Get non-wall neighbors (includes current position)
+            neighbors = Actions.getLegalNeighbors((x, y), walls)
+
+            # Remove current position from neighbors if present
+            neighbors = [n for n in neighbors if n != (x, y)]
+            num_neighbors = len(neighbors)
+
+            # Junction: 3+ neighbors (decision point) or dead end (1 neighbor)
+            # Tiles with exactly 2 neighbors are corridor tiles, not junctions
+            if num_neighbors == 1 or num_neighbors >= 3:
+                junction_type = "dead_end" if num_neighbors == 1 else "junction"
+                junctions[(x, y)] = Junction(
+                    pos=(x, y),
+                    neighbors=neighbors,
+                    junction_type=junction_type,
+                    connected_junctions={},
+                )
+
+    return junctions
+
+
+def build_corridors(
+    junctions: Dict[Tuple[int, int], Junction], walls, width: int, height: int
+):
+    """
+    Build corridors (edges) connecting junctions by following paths with only 2 neighbors.
+
+    Returns:
+        - corridors: Dict of corridor_id -> Corridor
+        - tile_to_corridor: Dict of tile_pos -> corridor_id
+    """
+    corridors = {}
+    tile_to_corridor = {}
+    corridor_id = 0
+
+    # For each junction, trace corridors to connected junctions
+    for junction_pos, junction in junctions.items():
+        for neighbor_pos in junction.neighbors:
+            # Check if we've already explored this corridor from the other end
+            if neighbor_pos in junctions:
+                # Direct connection between two junctions (no corridor tiles)
+                other_junction_pos = neighbor_pos
+                if other_junction_pos not in junction.connected_junctions:
+                    junction.connected_junctions[other_junction_pos] = 1
+                    junctions[other_junction_pos].connected_junctions[junction_pos] = 1
+
+                    # Create corridor
+                    corridor = Corridor(
+                        corridor_id=corridor_id,
+                        junction_a=junction_pos,
+                        junction_b=other_junction_pos,
+                        length=1,
+                        path=[junction_pos, other_junction_pos],
+                    )
+                    corridors[corridor_id] = corridor
+                    corridor_id += 1
+            else:
+                # Trace the corridor
+                path, end_junction = trace_corridor(
+                    junction_pos, neighbor_pos, junctions, walls
+                )
+
+                if end_junction and end_junction not in junction.connected_junctions:
+                    corridor_length = (
+                        len(path) - 1
+                    )  # Subtract 1 to not count the starting junction
+                    junction.connected_junctions[end_junction] = corridor_length
+                    junctions[end_junction].connected_junctions[
+                        junction_pos
+                    ] = corridor_length
+
+                    # Create corridor
+                    corridor = Corridor(
+                        corridor_id=corridor_id,
+                        junction_a=junction_pos,
+                        junction_b=end_junction,
+                        length=corridor_length,
+                        path=path,
+                    )
+                    corridors[corridor_id] = corridor
+
+                    # Map all tiles in this corridor
+                    for tile_pos in path:
+                        if (
+                            tile_pos not in junctions
+                        ):  # Don't override junction positions
+                            tile_to_corridor[tile_pos] = corridor_id
+
+                    corridor_id += 1
+
+    return corridors, tile_to_corridor
+
+
+def trace_corridor(
+    start_junction: Tuple[int, int],
+    first_tile: Tuple[int, int],
+    junctions: Dict[Tuple[int, int], Junction],
+    walls,
+) -> Tuple[List[Tuple[int, int]], Tuple[int, int]]:
+    """
+    Trace a corridor from a junction until we hit another junction.
+
+    Returns:
+        - path: List of tiles in the corridor (including both endpoints)
+        - end_junction: The junction we ended at (or None if we hit a wall)
+    """
+    path = [start_junction]  # Start with just the starting junction
+    current = first_tile
+    previous = start_junction
+
+    while True:
+        # Check if current position is a junction FIRST
+        if current in junctions:
+            path.append(current)
+            return path, current
+
+        # Not a junction yet, add to path
+        path.append(current)
+
+        # Get neighbors (excluding current position)
+        neighbors = Actions.getLegalNeighbors(current, walls)
+        neighbors = [n for n in neighbors if n != current]
+
+        # Find the forward neighbor (not the one we came from)
+        forward_neighbors = [n for n in neighbors if n != previous]
+
+        if len(forward_neighbors) != 1:
+            # This shouldn't happen if junctions are identified correctly
+            # If we have 0 neighbors: dead end (should be a junction)
+            # If we have 2+ neighbors: decision point (should be a junction)
+            return path, None
+
+        # Continue down the corridor
+        next_tile = forward_neighbors[0]
+        previous = current
+        current = next_tile
+
+
+def find_articulation_points(junctions: Dict[Tuple[int, int], Junction]) -> set:
+    """
+    Find articulation points (cut vertices) in the junction graph using DFS.
+
+    An articulation point is a junction that, if removed, would disconnect the graph.
+    These are critical choke points.
+    """
+    if not junctions:
+        return set()
+
+    articulation_points = set()
+    visited = set()
+    disc = {}  # Discovery time
+    low = {}  # Lowest discovery time reachable
+    parent = {}
+    time = [0]
+
+    def dfs(u):
+        children = 0
+        visited.add(u)
+        disc[u] = low[u] = time[0]
+        time[0] += 1
+
+        for v in junctions[u].connected_junctions.keys():
+            if v not in visited:
+                children += 1
+                parent[v] = u
+                dfs(v)
+
+                # Check if subtree rooted at v has connection back to ancestors of u
+                low[u] = min(low[u], low[v])
+
+                # u is articulation point in two cases:
+                # 1) u is root of DFS tree and has two or more children
+                # 2) u is not root and low[v] >= disc[u]
+                if parent.get(u) is None and children > 1:
+                    articulation_points.add(u)
+                if parent.get(u) is not None and low[v] >= disc[u]:
+                    articulation_points.add(u)
+            elif v != parent.get(u):
+                low[u] = min(low[u], disc[v])
+
+    # Run DFS from first junction
+    first_junction = next(iter(junctions.keys()))
+    parent[first_junction] = None
+    dfs(first_junction)
+
+    return articulation_points
+
+
+def find_dead_end_zones(
+    junctions: Dict[Tuple[int, int], Junction],
+    articulation_points: set,
+    walls,
+    width: int,
+    height: int,
+) -> Dict[Tuple[int, int], Tuple[int, int]]:
+    """
+    Identify tiles that belong to dead-end zones (regions with only one exit).
+
+    Returns:
+        Dict mapping tile_pos -> exit_junction_pos
+    """
+    # Two-pass algorithm:
+    # Pass 1: Find all components for all articulation points
+    # Pass 2: Only mark components that appear for exactly one articulation point (true dead-ends)
+
+    component_to_exits = {}  # Maps frozenset of junctions -> list of articulation points
+
+    # Pass 1: Find all components
+    for art_point in articulation_points:
+        visited = set([art_point])  # Don't traverse through the articulation point
+
+        # Start BFS/DFS from each neighbor of the articulation point
+        for neighbor_junction in junctions[art_point].connected_junctions.keys():
+            # Skip other articulation points - they separate zones
+            if neighbor_junction in articulation_points:
+                continue
+
+            if neighbor_junction not in visited:
+                # This starts a new component
+                component_junctions = set()
+                queue = [neighbor_junction]
+                visited.add(neighbor_junction)
+
+                while queue:
+                    current_junction = queue.pop(0)
+                    component_junctions.add(current_junction)
+
+                    for next_junction in junctions[
+                        current_junction
+                    ].connected_junctions.keys():
+                        # Don't traverse through other articulation points
+                        if next_junction in articulation_points:
+                            continue
+                        if next_junction not in visited:
+                            visited.add(next_junction)
+                            queue.append(next_junction)
+
+                # Track which articulation points can access this component
+                component_id = frozenset(component_junctions)
+                if component_id not in component_to_exits:
+                    component_to_exits[component_id] = []
+                component_to_exits[component_id].append(art_point)
+
+    # Pass 2: Only mark TRUE dead-end zones (components with exactly one exit)
+    dead_end_zones = {}
+
+    for component_junctions, exit_points in component_to_exits.items():
+        if len(exit_points) == 1:
+            # This is a true dead-end zone with only one exit
+            exit_junction = exit_points[0]
+
+            # Flood fill from all junctions in this component
+            for junction in component_junctions:
+                flood_fill_dead_end_zone(
+                    junction,
+                    exit_junction,
+                    dead_end_zones,
+                    walls,
+                    width,
+                    height,
+                    junctions,
+                    articulation_points,
+                )
+
+            # Also mark the articulation point itself as part of this zone (it's the exit)
+            if exit_junction not in dead_end_zones:
+                dead_end_zones[exit_junction] = exit_junction
+
+    return dead_end_zones
+
+
+def flood_fill_dead_end_zone(
+    start_pos: Tuple[int, int],
+    exit_junction: Tuple[int, int],
+    dead_end_zones: Dict[Tuple[int, int], Tuple[int, int]],
+    walls,
+    width: int,
+    height: int,
+    junctions: Dict[Tuple[int, int], Junction],
+    articulation_points: set,
+):
+    """
+    Flood fill to mark all tiles in a dead-end zone.
+    Stops at articulation points (don't cross into other zones).
+    """
+    if start_pos in dead_end_zones:
+        return  # Already processed
+
+    visited = set()
+    queue = [start_pos]
+
+    while queue:
+        current_pos = queue.pop(0)
+
+        if current_pos in visited:
+            continue
+
+        visited.add(current_pos)
+
+        # Mark this tile as part of the dead-end zone
+        if current_pos not in dead_end_zones:
+            dead_end_zones[current_pos] = exit_junction
+
+        # Explore neighbors
+        neighbors = Actions.getLegalNeighbors(current_pos, walls)
+        for neighbor in neighbors:
+            # Don't cross ANY articulation points (they separate zones)
+            if neighbor in articulation_points:
+                continue
+            if neighbor not in visited:
+                queue.append(neighbor)
 
 
 @profile

@@ -55,7 +55,7 @@ def main():
         layout = layouts[i]
 
         # Red team loses when score is negative
-        if score < 0:
+        if score <= 0:
             save_layout(layout, i+1, score)
             losses_saved += 1
 
