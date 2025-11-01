@@ -33,7 +33,7 @@ from util import nearestPoint, manhattanDistance
 import sys, os
 import pickle
 from dataclasses import dataclass
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 
 
 @dataclass
@@ -1936,14 +1936,13 @@ class MixedAgent(CaptureAgent):
     
     def calculate_advantages(self, gameState: GameState):
         """
-        Finds the current advantages at each junct: {(junct_x, junct_y) : [[keeper_idxs] num_adv]
+        Finds the current advantages at each junct: {(x, y) : (((ally_idx, dist), (ally2_idx, dist)), num_adv)
         """
         walls = gameState.getWalls()
         width, height = walls.width, walls.height
 
         junctions = MixedAgent.MAP_TOPOLOGY.junctions
-        advantages = {} # {(junct_x, junct_y) : ((keeper_idx,), num_adv)}
-                        # keeper is the closest ally/s
+        advantages = {} # {(junct_x, junct_y) : (((ally_idx, dist), (ally2_idx, dist)), num_adv)}
         team_pos = tuple((idx, gameState.getAgentPosition(idx)) 
                          for idx in self.getTeam(gameState))
         enemy_pos = set()
@@ -1960,11 +1959,8 @@ class MixedAgent(CaptureAgent):
             min_team_distance = min(dist for _, dist in team_distances)
             adv = min(self.getMazeDistance(pos, junct) for pos in enemy_pos) - \
                   min_team_distance
-            keepers = []
-            for idx, dist in team_distances:
-                if dist == min_team_distance:
-                    keepers.append(idx)
-            advantages[junct] = [keepers, adv]
+            
+            advantages[junct] = (team_distances, adv)
             
         return advantages
 # ==================== Topological Map Preprocessing ====================
