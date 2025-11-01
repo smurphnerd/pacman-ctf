@@ -91,9 +91,23 @@
 
     ;define actions here
 
+    ;Attack - cross into enemy territory to get food
+    (:action attack
+        :parameters (?a - current_agent)
+        :precondition (and
+            (not (is_pacman ?a))
+        )
+        :effect (and
+            (is_pacman ?a)
+        )
+    )
+
     ;Eat food - collect food while in enemy territory
     (:action eat_food
         :parameters (?a - current_agent)
+        :precondition (and
+            (is_pacman ?a)
+        )
         :effect (and
             (fat_agent ?a)
             (fat_agent_gt3 ?a)

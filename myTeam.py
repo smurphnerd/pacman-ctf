@@ -23,7 +23,6 @@
 from ast import Raise
 from typing import List, Tuple, Dict
 
-from numpy import true_divide
 import numpy as np
 from captureAgents import CaptureAgent
 import distanceCalculator
@@ -181,7 +180,6 @@ class MixedAgent(CaptureAgent):
             # "stop-reverse": -5,
         },
     }
-    QLWeightsFile = BASE_FOLDER + "/QLWeightsMyTeam.pkl"
 
     # Also can use class variable to exchange information between agents.
     CURRENT_ACTION = {}
@@ -190,7 +188,9 @@ class MixedAgent(CaptureAgent):
     DEFENSIVE_ASSIGNMENTS = defaultdict(int)
     NUM_GAMES = 0
     MAP_TOPOLOGY: MapTopology = None  # Cached topological map analysis
-    CURRENT_LAYOUT_STR = None  # String representation of current layout for cache invalidation
+    CURRENT_LAYOUT_STR = (
+        None  # String representation of current layout for cache invalidation
+    )
 
     def registerInitialState(self, gameState: GameState):
         self.pddl_solver = pddl_solver(BASE_FOLDER + "/myTeam.pddl")
@@ -238,24 +238,11 @@ class MixedAgent(CaptureAgent):
             )
 
         # REMEMBER TRUN TRAINNING TO FALSE when submit to contest server.
-        self.trainning = False  # trainning mode to true will keep update weights and generate random movements by prob.
         self.epsilon = 0.1  # default exploration prob, change to take a random step
         self.alpha = 0.02  # default learning rate
         self.discountRate = (
             0.9  # default discount rate on successor state q value when update
         )
-
-        # Load learned weights if they exist
-        try:
-            if os.path.exists(MixedAgent.QLWeightsFile):
-                with open(MixedAgent.QLWeightsFile, "rb") as f:
-                    MixedAgent.QLWeights = pickle.load(f)
-                if self.debug:
-                    print(
-                        f"Agent {self.index}: Loaded learned weights from {MixedAgent.QLWeightsFile}"
-                    )
-        except Exception as e:
-            print(f"Agent {self.index}: Could not load weights: {e}")
 
         # Initialize belief tracking for opponents
         MixedAgent.OPPONENT_BELIEFS = initialize_beliefs(gameState)
@@ -282,27 +269,6 @@ class MixedAgent(CaptureAgent):
         This function write weights into files after the game is over.
         You may want to comment (disallow) this function when submit to contest server.
         """
-        if self.trainning:
-            # Only save from one agent to avoid race condition
-            if self.index == 0:
-                try:
-                    with open(MixedAgent.QLWeightsFile, "wb") as f:
-                        pickle.dump(MixedAgent.QLWeights, f)
-                    if self.debug:
-                        print(
-                            f"Agent {self.index}: Saved learned weights to {MixedAgent.QLWeightsFile}"
-                        )
-                        print(
-                            "Offensive weights:",
-                            MixedAgent.QLWeights["offensiveWeights"],
-                        )
-                        print(
-                            "Defensive weights:",
-                            MixedAgent.QLWeights["defensiveWeights"],
-                        )
-                        print("Escape weights:", MixedAgent.QLWeights["escapeWeights"])
-                except Exception as e:
-                    print(f"Agent {self.index}: Could not save weights: {e}")
 
     def updateEstimatedPositions(self, gameState: GameState):
         """
@@ -405,11 +371,30 @@ class MixedAgent(CaptureAgent):
         # A low level action is defined in Directions, whihc include {"North", "South", "East", "West", "Stop"}
 
         if not self.posSatisfyLowLevelPlan(gameState):
-            self.lowLevelPlan = self.getLowLevelPlanQL(
-                gameState, highLevelAction.name
-            )  # Generate low level plan with q learning
-            # you can replace the getLowLevelPlanQL with getLowLevelPlanHS and implement heuristic search planner
+            if highLevelAction.name in ["eat_food"]:
+                self.lowLevelPlan = self.getLowLevelPlanHS(
+                    gameState, highLevelAction.name
+                )
+                # Fallback to Q-learning if heuristic search returns no plan
+                if not self.lowLevelPlan:
+                    if self.debug:
+                        print(f"Agent {self.index}: HS planner failed, using QL fallback")
+                    self.lowLevelPlan = self.getLowLevelPlanQL(
+                        gameState, highLevelAction.name
+                    )
+            else:
+                self.lowLevelPlan = self.getLowLevelPlanQL(
+                    gameState, highLevelAction.name
+                )  # Generate low level plan with q learning
+                # you can replace the getLowLevelPlanQL with getLowLevelPlanHS and implement heuristic search planner
             self.lowLevelActionIndex = 0
+
+        # Safety check in case plan is still empty
+        if not self.lowLevelPlan or self.lowLevelActionIndex >= len(self.lowLevelPlan):
+            if self.debug:
+                print(f"Agent {self.index}: Empty plan, returning STOP")
+            return Directions.STOP
+
         lowLevelAction = self.lowLevelPlan[self.lowLevelActionIndex][0]
         self.lowLevelActionIndex += 1
 
@@ -918,6 +903,189 @@ class MixedAgent(CaptureAgent):
             return False
         return True
 
+
+    def isJunctionSafe(self, junction_pos: Tuple[int, int], my_pos: Tuple[int, int], gameState: GameState, enemyVirtualStates: Dict[int, AgentState]) -> bool:
+        """
+        Check if a junction is safe to visit.
+
+        A junction is safe if:
+        1. We can reach it before any non-scared ghost
+        2. If it's in a dead-end zone, we can reach the exit before enemies
+        """
+        topology = MixedAgent.MAP_TOPOLOGY
+
+        my_dist = self.getMazeDistance(my_pos, junction_pos)
+
+        # Check all non-scared enemy ghosts
+        for enemy_idx, enemy_state in enemyVirtualStates.items():
+            if not enemy_state.isPacman and enemy_state.scaredTimer <= LOW_SCARED_TIMER:
+                enemy_pos = enemy_state.getPosition()
+                if not enemy_pos:
+                    continue
+
+                enemy_dist = self.getMazeDistance(enemy_pos, junction_pos)
+
+                # If in a dead-end zone, check if we can escape
+                if junction_pos in topology.dead_end_zones:
+                    exit_pos = topology.dead_end_zones[junction_pos]
+
+                    # Total distance: to junction + from junction to exit
+                    my_total_dist = my_dist + self.getMazeDistance(junction_pos, exit_pos)
+                    enemy_dist_to_exit = self.getMazeDistance(enemy_pos, exit_pos)
+
+                    # Enemy can block exit? Not safe
+                    if enemy_dist_to_exit <= my_total_dist + 2:
+                        return False
+
+                # Enemy is much closer to junction? Not safe
+                elif enemy_dist < my_dist - 2:
+                    return False
+
+        return True
+
+    def selectBestJunctionForFood(self, gameState: GameState, enemyVirtualStates: Dict[int, AgentState]) -> Tuple[int, int]:
+        """
+        Select the best adjacent junction to move toward for collecting food.
+
+        Returns the junction position, or None if no good option.
+        """
+        topology = MixedAgent.MAP_TOPOLOGY
+        my_pos = gameState.getAgentPosition(self.index)
+        foods = self.getFood(gameState).asList()
+
+        if not foods:
+            return None
+
+        # Find which junction we're at or near
+        current_junction = None
+        if my_pos in topology.junctions:
+            current_junction = my_pos
+        elif my_pos in topology.tile_to_corridor:
+            # In a corridor - find nearest endpoint
+            corridor_id = topology.tile_to_corridor[my_pos]
+            corridor = topology.corridors[corridor_id]
+            dist_a = self.getMazeDistance(my_pos, corridor.junction_a)
+            dist_b = self.getMazeDistance(my_pos, corridor.junction_b)
+            current_junction = corridor.junction_a if dist_a <= dist_b else corridor.junction_b
+
+        if not current_junction:
+            # Fallback: find nearest junction
+            current_junction = min(topology.junctions.keys(),
+                                 key=lambda j: self.getMazeDistance(my_pos, j))
+
+        # Get adjacent junctions (neighbors in the junction graph)
+        current_junction_obj = topology.junctions[current_junction]
+        adjacent_junctions = list(current_junction_obj.connected_junctions.keys())
+
+        # Also consider staying at current junction if there's food nearby
+        adjacent_junctions.append(current_junction)
+
+        # Score each adjacent junction
+        best_junction = None
+        best_score = float('inf')
+
+        for junction_pos in adjacent_junctions:
+            # Skip if not safe
+            if not self.isJunctionSafe(junction_pos, my_pos, gameState, enemyVirtualStates):
+                continue
+
+            # Find closest food to this junction
+            min_food_dist = min([self.getMazeDistance(junction_pos, f) for f in foods])
+
+            # Distance from current position to this junction
+            my_dist_to_junction = self.getMazeDistance(my_pos, junction_pos)
+
+            # Score: prioritize junctions close to food and close to us
+            score = min_food_dist * 3 + my_dist_to_junction
+
+            if score < best_score:
+                best_score = score
+                best_junction = junction_pos
+
+        return best_junction
+
+    def aStarSearch(self, start: Tuple[int, int], goal: Tuple[int, int], gameState: GameState) -> List[Tuple[int, int]]:
+        """A* search from start to goal."""
+        from util import PriorityQueue
+
+        walls = gameState.getWalls()
+        frontier = PriorityQueue()
+        frontier.push((start, [start]), 0)
+        explored = set()
+
+        while not frontier.isEmpty():
+            current_pos, path = frontier.pop()
+
+            if current_pos == goal:
+                return path
+
+            if current_pos in explored:
+                continue
+
+            explored.add(current_pos)
+
+            for next_pos in Actions.getLegalNeighbors(current_pos, walls):
+                if next_pos not in explored:
+                    new_path = path + [next_pos]
+                    g_cost = len(new_path) - 1
+                    h_cost = self.getMazeDistance(next_pos, goal)
+                    frontier.push((next_pos, new_path), g_cost + h_cost)
+
+        return []
+
+    def getLowLevelPlanHS(self, gameState: GameState, highLevelAction: str) -> List[Tuple[str,Tuple]]:
+        walls = gameState.getWalls()
+
+        if highLevelAction == "eat_food":
+            # Get enemy states for safety checking
+            stateInfo = self.getStateInfo(gameState)
+            enemyVirtualStates = stateInfo.enemyVirtualStates
+
+            my_pos = gameState.getAgentPosition(self.index)
+
+            # Select best junction to move toward
+            target_junction = self.selectBestJunctionForFood(gameState, enemyVirtualStates)
+
+            if not target_junction:
+                if self.debug:
+                    print(f"Agent {self.index}: No safe junction found for eat_food")
+                return []
+
+            # Use A* to find path to target junction
+            path = self.aStarSearch(my_pos, target_junction, gameState)
+
+            if not path or len(path) <= 1:
+                return []
+
+            # Convert path to (action, position) tuples
+            plan = []
+            for i in range(len(path) - 1):
+                current = path[i]
+                next_pos = path[i + 1]
+
+                dx = next_pos[0] - current[0]
+                dy = next_pos[1] - current[1]
+
+                if dx == 1:
+                    action = Directions.EAST
+                elif dx == -1:
+                    action = Directions.WEST
+                elif dy == 1:
+                    action = Directions.NORTH
+                elif dy == -1:
+                    action = Directions.SOUTH
+                else:
+                    action = Directions.STOP
+
+                plan.append((action, next_pos))
+
+            if self.debug:
+                print(f"Agent {self.index}: Moving to junction {target_junction}, path length={len(plan)}")
+
+            return plan
+
+        return []
+
     # ------------------------------- Q-learning low level plan Functions -------------------------------
 
     """
@@ -941,12 +1109,7 @@ class MixedAgent(CaptureAgent):
         # Classify high level actions into offensive, retreat, or defensive categories
         ##########
         # Offensive actions: attack, aggressive_attack, desperate_attack
-        if highLevelAction == "attack":
-            # Offensive actions - use offensive features and rewards
-            featureFunction = self.getAttackFeatures
-            weights = MixedAgent.QLWeights["attackWeights"]
-        # Retreat actions: go_home_with_food, go_home_retreat, emergency_retreat, or any action with "retreat"/"escape"/"go_home" in name
-        elif highLevelAction == "eat_food":
+        if highLevelAction == "eat_food":
             # Escape actions - complete reward function implemented
             featureFunction = self.getEatFoodFeatures
             weights = MixedAgent.QLWeights["eatFoodWeights"]
@@ -974,49 +1137,33 @@ class MixedAgent(CaptureAgent):
         stateInfo = self.getStateInfo(gameState)
 
         if len(legalActions) != 0:
-            prob = util.flipCoin(self.epsilon)  # get change of perform random movement
-            if prob and self.trainning:
-                action = random.choice(legalActions)
-            else:
-                for action in legalActions:
-                    # if self.trainning:
-                    #     self.updateWeights(
-                    #         gameState,
-                    #         action,
-                    #         rewardFunction,
-                    #         featureFunction,
-                    #         weights,
-                    #         learningRate,
-                    #     )
-                    # print("Agent",self.index," weights:", weights)
-                    nextStateInfo = self.getStateInfo(
-                        self.getSuccessor(gameState, action)
-                    )
-                    features = featureFunction(stateInfo, nextStateInfo, action)
-                    qval = self.getQValue(features, weights)
-                    values.append((qval, action, features))
+            for action in legalActions:
+                nextStateInfo = self.getStateInfo(self.getSuccessor(gameState, action))
+                features = featureFunction(stateInfo, nextStateInfo, action)
+                qval = self.getQValue(features, weights)
+                values.append((qval, action, features))
 
-                # Debug: print Q-values and feature breakdown for all actions
-                if len(values) > 0 and self.debug:
-                    print(f"\nAgent {self.index} ({highLevelAction}) - Q-values:")
-                    for qval, act, feats in values:
-                        # Show only non-zero features
-                        feat_breakdown = {
-                            k: (
-                                round(feats[k], 3),
-                                round(weights[k], 2),
-                                round(feats[k] * weights[k], 2),
-                            )
-                            for k in feats
-                            if feats[k] != 0
-                        }
-                        print(
-                            f"  {act}: Q={round(qval, 2)} | Features (val, weight, contribution): {feat_breakdown}"
+            # Debug: print Q-values and feature breakdown for all actions
+            if len(values) > 0 and self.debug:
+                print(f"\nAgent {self.index} ({highLevelAction}) - Q-values:")
+                for qval, act, feats in values:
+                    # Show only non-zero features
+                    feat_breakdown = {
+                        k: (
+                            round(feats[k], 3),
+                            round(weights[k], 2),
+                            round(feats[k] * weights[k], 2),
                         )
+                        for k in feats
+                        if feats[k] != 0
+                    }
+                    print(
+                        f"  {act}: Q={round(qval, 2)} | Features (val, weight, contribution): {feat_breakdown}"
+                    )
 
-                action = max(values, key=lambda x: x[0])[1]
-                if self.debug:
-                    print(f"Agent {self.index}: Best action: {action}")
+            action = max(values, key=lambda x: x[0])[1]
+            if self.debug:
+                print(f"Agent {self.index}: Best action: {action}")
         myPos = gameState.getAgentPosition(self.index)
         nextPos = Actions.getSuccessor(myPos, action)
         return [(action, nextPos)]
@@ -1035,41 +1182,6 @@ class MixedAgent(CaptureAgent):
     its weight values using the following formula:
     w(i) = w(i) + alpha((reward + discount*value(nextState)) - Q(s,a)) * f(i)(s,a)
     """
-
-    @profile
-    def updateWeights(
-        self, gameState, action, rewardFunction, featureFunction, weights, learningRate
-    ):
-        features = featureFunction(gameState, action)
-        nextState = self.getSuccessor(gameState, action)
-
-        reward = rewardFunction(gameState, nextState)
-        for feature in features:
-            correction = (
-                reward
-                + self.discountRate * self.getValue(nextState, featureFunction, weights)
-            ) - self.getQValue(features, weights)
-            weights[feature] = (
-                weights[feature] + learningRate * correction * features[feature]
-            )
-
-    """
-    Iterate through all q-values that we get from all
-    possible actions, and return the highest q-value
-    """
-
-    @profile
-    def getValue(self, nextState: GameState, featureFunction, weights):
-        qVals = []
-        legalActions = nextState.getLegalActions(self.index)
-
-        if len(legalActions) == 0:
-            return 0.0
-        else:
-            for action in legalActions:
-                features = featureFunction(nextState, action)
-                qVals.append(self.getQValue(features, weights))
-            return max(qVals)
 
     # ------------------------------- Feature Related Action Functions -------------------------------
 
@@ -1872,7 +1984,7 @@ def visualize_topology(topology: MapTopology, walls):
     # Helper function to create a map string
     def create_map_string(highlight_tiles: Dict[Tuple[int, int], str], title: str):
         """Create a string representation of the map with highlighted tiles."""
-        result = [f"\n{'=' * 60}", f"{title:^60}", '=' * 60]
+        result = [f"\n{'=' * 60}", f"{title:^60}", "=" * 60]
 
         # Build map from bottom to top (y decreases as we go down in output)
         for y in range(height - 1, -1, -1):
@@ -1880,30 +1992,30 @@ def visualize_topology(topology: MapTopology, walls):
             for x in range(width):
                 pos = (x, y)
                 if walls[x][y]:
-                    row.append('%')  # Wall
+                    row.append("%")  # Wall
                 elif pos in highlight_tiles:
                     row.append(highlight_tiles[pos])  # Highlighted tile
                 else:
-                    row.append(' ')  # Empty space
-            result.append(''.join(row))
+                    row.append(" ")  # Empty space
+            result.append("".join(row))
 
-        result.append('=' * 60)
-        return '\n'.join(result)
+        result.append("=" * 60)
+        return "\n".join(result)
 
     # 1. Junctions map
     junction_tiles = {}
     for pos, junction in topology.junctions.items():
         if junction.junction_type == "junction":
-            junction_tiles[pos] = 'J'  # Junction (3+ neighbors)
+            junction_tiles[pos] = "J"  # Junction (3+ neighbors)
         elif junction.junction_type == "dead_end":
-            junction_tiles[pos] = 'D'  # Dead end (1 neighbor)
+            junction_tiles[pos] = "D"  # Dead end (1 neighbor)
 
     print(create_map_string(junction_tiles, "JUNCTIONS (J=junction, D=dead end)"))
 
     # 2. Corridors map
     corridor_tiles = {}
     # Use different characters for different corridors (cycling through a set)
-    corridor_chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+    corridor_chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
     for corridor_id, corridor in topology.corridors.items():
         char = corridor_chars[corridor_id % len(corridor_chars)]
@@ -1913,28 +2025,40 @@ def visualize_topology(topology: MapTopology, walls):
 
     # Add junctions as endpoints
     for pos in topology.junctions.keys():
-        corridor_tiles[pos] = '+'
+        corridor_tiles[pos] = "+"
 
-    print(create_map_string(corridor_tiles, "CORRIDORS (+= junction, 0-9A-Za-z = corridor ID)"))
+    print(
+        create_map_string(
+            corridor_tiles, "CORRIDORS (+= junction, 0-9A-Za-z = corridor ID)"
+        )
+    )
 
-    # 3. Articulation points map
-    articulation_tiles = {}
-    for pos in topology.articulation_points:
-        articulation_tiles[pos] = 'A'  # Articulation point
+    # 3. Dead-end zone exit locations map
+    exit_tiles = {}
 
-    # Also show other junctions for context
+    # Find all unique exit junctions
+    unique_exits = set(topology.dead_end_zones.values())
+
+    for pos in unique_exits:
+        exit_tiles[pos] = "X"  # Exit junction
+
+    # Show other junctions for context
     for pos, junction in topology.junctions.items():
-        if pos not in articulation_tiles:
-            articulation_tiles[pos] = '.'  # Regular junction
+        if pos not in exit_tiles:
+            exit_tiles[pos] = "."  # Regular junction
 
-    print(create_map_string(articulation_tiles, "ARTICULATION POINTS (A=critical choke, .=junction)"))
+    print(
+        create_map_string(
+            exit_tiles, "DEAD-END ZONE EXITS (X=exit from dead-end, .=junction)"
+        )
+    )
 
     # 4. Dead-end zones map
     dead_zone_tiles = {}
 
     # Group dead-end zones by their exit junction
     exit_junction_to_char = {}
-    chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     char_index = 0
 
     for tile_pos, exit_junction in topology.dead_end_zones.items():
@@ -1946,22 +2070,26 @@ def visualize_topology(topology: MapTopology, walls):
 
     # Mark exit junctions with 'X'
     for exit_junction in exit_junction_to_char.keys():
-        dead_zone_tiles[exit_junction] = 'X'
+        dead_zone_tiles[exit_junction] = "X"
 
     print(create_map_string(dead_zone_tiles, "DEAD-END ZONES (X=exit, A-Z0-9=zone ID)"))
 
     # Print summary statistics
     print(f"\n{'=' * 60}")
     print(f"{'TOPOLOGY SUMMARY':^60}")
-    print('=' * 60)
+    print("=" * 60)
     print(f"Total junctions: {len(topology.junctions)}")
-    print(f"  - Decision points (3+ neighbors): {sum(1 for j in topology.junctions.values() if j.junction_type == 'junction')}")
-    print(f"  - Dead ends (1 neighbor): {sum(1 for j in topology.junctions.values() if j.junction_type == 'dead_end')}")
+    print(
+        f"  - Decision points (3+ neighbors): {sum(1 for j in topology.junctions.values() if j.junction_type == 'junction')}"
+    )
+    print(
+        f"  - Dead ends (1 neighbor): {sum(1 for j in topology.junctions.values() if j.junction_type == 'dead_end')}"
+    )
     print(f"Total corridors: {len(topology.corridors)}")
     print(f"Articulation points (critical chokes): {len(topology.articulation_points)}")
     print(f"Tiles in dead-end zones: {len(topology.dead_end_zones)}")
     print(f"Dead-end zones: {len(set(topology.dead_end_zones.values()))}")
-    print('=' * 60 + '\n')
+    print("=" * 60 + "\n")
 
 
 def find_junctions(walls, width: int, height: int) -> Dict[Tuple[int, int], Junction]:
@@ -2176,119 +2304,94 @@ def find_dead_end_zones(
     """
     Identify tiles that belong to dead-end zones (regions with only one exit).
 
+    Simplified approach: For each articulation point, temporarily remove it and
+    do a tile-level flood fill from the map center. Tiles that become unreachable
+    form a dead-end zone with that articulation point as the exit.
+
     Returns:
         Dict mapping tile_pos -> exit_junction_pos
     """
-    # Two-pass algorithm:
-    # Pass 1: Find all components for all articulation points
-    # Pass 2: Only mark components that appear for exactly one articulation point (true dead-ends)
-
-    component_to_exits = {}  # Maps frozenset of junctions -> list of articulation points
-
-    # Pass 1: Find all components
-    for art_point in articulation_points:
-        visited = set([art_point])  # Don't traverse through the articulation point
-
-        # Start BFS/DFS from each neighbor of the articulation point
-        for neighbor_junction in junctions[art_point].connected_junctions.keys():
-            # Skip other articulation points - they separate zones
-            if neighbor_junction in articulation_points:
-                continue
-
-            if neighbor_junction not in visited:
-                # This starts a new component
-                component_junctions = set()
-                queue = [neighbor_junction]
-                visited.add(neighbor_junction)
-
-                while queue:
-                    current_junction = queue.pop(0)
-                    component_junctions.add(current_junction)
-
-                    for next_junction in junctions[
-                        current_junction
-                    ].connected_junctions.keys():
-                        # Don't traverse through other articulation points
-                        if next_junction in articulation_points:
-                            continue
-                        if next_junction not in visited:
-                            visited.add(next_junction)
-                            queue.append(next_junction)
-
-                # Track which articulation points can access this component
-                component_id = frozenset(component_junctions)
-                if component_id not in component_to_exits:
-                    component_to_exits[component_id] = []
-                component_to_exits[component_id].append(art_point)
-
-    # Pass 2: Only mark TRUE dead-end zones (components with exactly one exit)
     dead_end_zones = {}
 
-    for component_junctions, exit_points in component_to_exits.items():
-        if len(exit_points) == 1:
-            # This is a true dead-end zone with only one exit
-            exit_junction = exit_points[0]
+    # Find a safe starting position (center of the map, adjusted to non-wall)
+    center_x, center_y = width // 2, height // 2
+    start_pos = None
+    for dx in range(max(width, height)):
+        for sx, sy in [(center_x + dx, center_y), (center_x - dx, center_y),
+                       (center_x, center_y + dx), (center_x, center_y - dx)]:
+            if 0 <= sx < width and 0 <= sy < height and not walls[sx][sy]:
+                start_pos = (sx, sy)
+                break
+        if start_pos:
+            break
 
-            # Flood fill from all junctions in this component
-            for junction in component_junctions:
-                flood_fill_dead_end_zone(
-                    junction,
-                    exit_junction,
-                    dead_end_zones,
-                    walls,
-                    width,
-                    height,
-                    junctions,
-                    articulation_points,
-                )
+    if not start_pos:
+        return dead_end_zones  # No valid starting position
 
-            # Also mark the articulation point itself as part of this zone (it's the exit)
-            if exit_junction not in dead_end_zones:
-                dead_end_zones[exit_junction] = exit_junction
+    # For each articulation point, find what becomes unreachable without it
+    # Store all zones temporarily to process them later
+    temp_zones = {}  # art_point -> list of unreachable tiles
+
+    for art_point in articulation_points:
+        # Flood fill from start_pos, treating art_point as a wall
+        reachable = set()
+        queue = [start_pos]
+
+        while queue:
+            current_pos = queue.pop(0)
+
+            if current_pos in reachable:
+                continue
+
+            # Skip the articulation point itself
+            if current_pos == art_point:
+                continue
+
+            reachable.add(current_pos)
+
+            # Explore neighbors
+            neighbors = Actions.getLegalNeighbors(current_pos, walls)
+            for neighbor in neighbors:
+                if neighbor not in reachable and neighbor != art_point:
+                    queue.append(neighbor)
+
+        # Any non-wall tile that's not reachable is in a dead-end zone
+        unreachable_tiles = []
+        for x in range(width):
+            for y in range(height):
+                pos = (x, y)
+                if not walls[x][y] and pos not in reachable:
+                    unreachable_tiles.append(pos)
+
+        # Only mark this as a dead-end zone if it's small (not the main map)
+        total_non_wall_tiles = sum(1 for x in range(width) for y in range(height) if not walls[x][y])
+
+        if unreachable_tiles and len(unreachable_tiles) < total_non_wall_tiles * 0.5:
+            # Store this zone temporarily
+            temp_zones[art_point] = unreachable_tiles
+
+    # Now process zones: only keep zones whose exit is NOT trapped in another zone
+    # This eliminates nested zones (only keep the outermost zone)
+    for art_point, zone_tiles in temp_zones.items():
+        # Check if this articulation point (exit) is trapped in any other zone
+        is_trapped = False
+        for other_art_point, other_zone_tiles in temp_zones.items():
+            if other_art_point != art_point and art_point in other_zone_tiles:
+                # This exit is trapped in another zone - skip it
+                is_trapped = True
+                break
+
+        if not is_trapped:
+            # This is a valid outermost zone - mark all tiles
+            for tile_pos in zone_tiles:
+                if tile_pos not in dead_end_zones:
+                    dead_end_zones[tile_pos] = art_point
+
+            # Also mark the articulation point itself
+            if art_point not in dead_end_zones:
+                dead_end_zones[art_point] = art_point
 
     return dead_end_zones
-
-
-def flood_fill_dead_end_zone(
-    start_pos: Tuple[int, int],
-    exit_junction: Tuple[int, int],
-    dead_end_zones: Dict[Tuple[int, int], Tuple[int, int]],
-    walls,
-    width: int,
-    height: int,
-    junctions: Dict[Tuple[int, int], Junction],
-    articulation_points: set,
-):
-    """
-    Flood fill to mark all tiles in a dead-end zone.
-    Stops at articulation points (don't cross into other zones).
-    """
-    if start_pos in dead_end_zones:
-        return  # Already processed
-
-    visited = set()
-    queue = [start_pos]
-
-    while queue:
-        current_pos = queue.pop(0)
-
-        if current_pos in visited:
-            continue
-
-        visited.add(current_pos)
-
-        # Mark this tile as part of the dead-end zone
-        if current_pos not in dead_end_zones:
-            dead_end_zones[current_pos] = exit_junction
-
-        # Explore neighbors
-        neighbors = Actions.getLegalNeighbors(current_pos, walls)
-        for neighbor in neighbors:
-            # Don't cross ANY articulation points (they separate zones)
-            if neighbor in articulation_points:
-                continue
-            if neighbor not in visited:
-                queue.append(neighbor)
 
 
 @profile
