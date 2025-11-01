@@ -188,6 +188,7 @@ class MixedAgent(CaptureAgent):
     DEFENSIVE_ASSIGNMENTS = defaultdict(int)
     NUM_GAMES = 0
     MAP_TOPOLOGY: MapTopology = None  # Cached topological map analysis
+    CURRENT_ADVANTAGES = {} # Cache for current distance advantage on junctions
     CURRENT_LAYOUT_STR = (
         None  # String representation of current layout for cache invalidation
     )
@@ -261,6 +262,9 @@ class MixedAgent(CaptureAgent):
                 print(f"\nAgent {self.index}: Built map topology for new layout")
                 visualize_topology(MixedAgent.MAP_TOPOLOGY, walls)
 
+        # Initialize values for distance advantage at all junctions
+        MixedAgent.CURRENT_ADVANTAGES = self.calculate_advantages(gameState)
+
         # Use a dictionary to save information about current agent.
         MixedAgent.CURRENT_ACTION[self.index] = {}
 
@@ -326,6 +330,9 @@ class MixedAgent(CaptureAgent):
 
         # Cache estimated enemy positions for this turn (computed once, reused many times)
         self.updateEstimatedPositions(gameState)
+
+        # Update advantages at all junctions
+        self.calculate_advantages(gameState)
 
         # -------------High Level Plan Section-------------------
         # Get high level action from a pddl plan.
@@ -1926,8 +1933,40 @@ class MixedAgent(CaptureAgent):
                 if opPos and not opIsPacman:
                     ghosts.append(opPos)
         return ghosts
+    
+    def calculate_advantages(self, gameState: GameState):
+        """
+        Finds the current advantages at each junct: {(junct_x, junct_y) : [[keeper_idxs] num_adv]
+        """
+        walls = gameState.getWalls()
+        width, height = walls.width, walls.height
 
-
+        junctions = MixedAgent.MAP_TOPOLOGY.junctions
+        advantages = {} # {(junct_x, junct_y) : ((keeper_idx,), num_adv)}
+                        # keeper is the closest ally/s
+        team_pos = tuple((idx, gameState.getAgentPosition(idx)) 
+                         for idx in self.getTeam(gameState))
+        enemy_pos = set()
+        for op in (self.getOpponents(gameState)):
+            belief = MixedAgent.OPPONENT_BELIEFS[op]
+            for x in range(width):
+                for y in range(height):
+                    if belief[x][y]:
+                        enemy_pos.add((x, y))
+        
+        for junct in junctions:
+            team_distances = tuple((idx, self.getMazeDistance(pos, junct)) 
+                                   for idx, pos in team_pos)
+            min_team_distance = min(dist for _, dist in team_distances)
+            adv = min(self.getMazeDistance(pos, junct) for pos in enemy_pos) - \
+                  min_team_distance
+            keepers = []
+            for idx, dist in team_distances:
+                if dist == min_team_distance:
+                    keepers.append(idx)
+            advantages[junct] = [keepers, adv]
+            
+        return advantages
 # ==================== Topological Map Preprocessing ====================
 
 
@@ -2011,7 +2050,6 @@ def visualize_topology(topology: MapTopology, walls):
             junction_tiles[pos] = "D"  # Dead end (1 neighbor)
 
     print(create_map_string(junction_tiles, "JUNCTIONS (J=junction, D=dead end)"))
-
     # 2. Corridors map
     corridor_tiles = {}
     # Use different characters for different corridors (cycling through a set)
@@ -2395,7 +2433,7 @@ def find_dead_end_zones(
 
 
 @profile
-def initialize_beliefs(game_state: GameState) -> Dict[int, List[List[float]]]:
+def initialize_beliefs(game_state: GameState, agents=None) -> Dict[int, List[List[float]]]:
     """
     Initialize belief distributions for all 4 agents to their exact starting positions.
 
@@ -2409,9 +2447,12 @@ def initialize_beliefs(game_state: GameState) -> Dict[int, List[List[float]]]:
     walls = game_state.getWalls()
     width, height = walls.width, walls.height
 
+    if not agents:
+        agents = range(4)
+
     beliefs = {}
 
-    for agent_idx in range(4):
+    for agent_idx in agents:
         # Create empty probability array
         prob_array = [[0.0 for _ in range(height)] for _ in range(width)]
 
@@ -2451,6 +2492,8 @@ def update_belief(
     """
     walls = game_state.getWalls()
     width, height = walls.width, walls.height
+
+    assert sum(sum(i) for i in prev_belief) > 0.5, f"lost track of opponent {opponent_idx}"
 
     # Step 1: Check if opponent is visible
     if game_state.getAgentPosition(opponent_idx) is not None:
@@ -2494,7 +2537,10 @@ def update_belief(
                 prior = prev_belief[x][y]
                 true_dist = manhattanDistance(observer_pos, (x, y))
                 likelihood = game_state.getDistanceProb(true_dist, noisy_dist)
-                updated_belief[x][y] = prior * likelihood
+                teammate_dist = manhattanDistance(game_state.getAgentPosition((observer_idx + 2) % 4),
+                                                  (x, y))
+                if min(true_dist, teammate_dist) > 5: # we know that the position is not in our sight range
+                    updated_belief[x][y] = prior * likelihood
 
     # Step 4: Normalize
     total_prob = sum(sum(row) for row in updated_belief)
@@ -2502,6 +2548,27 @@ def update_belief(
         for x in range(width):
             for y in range(height):
                 updated_belief[x][y] /= total_prob
+    else: # we lost track of opponent. this (probably) always means that they just
+          # died. so we reinitialize beliefs for this opponent
+        updated_belief = initialize_beliefs(game_state, [opponent_idx])[opponent_idx]
+        # need to propagate from their spawn if they just moved
+        prev_agent_idx = (observer_idx - 1) % 4
+
+        if opponent_idx == prev_agent_idx:
+            new_beliefs = [[0.0 for _ in range(height)] for _ in range(width)]
+
+            for x in range(width):
+                for y in range(height):
+                    if updated_belief[x][y] > 0:
+                        # From position (x,y), distribute probability to reachable neighbors
+                        neighbors = Actions.getLegalNeighbors((x, y), walls)
+                        prob_per_neighbor = updated_belief[x][y] / len(neighbors)
+
+                        for nx, ny in neighbors:
+                            new_beliefs[nx][ny] += prob_per_neighbor
+
+            updated_belief = new_beliefs
+
 
     return updated_belief
 
@@ -2541,4 +2608,126 @@ def update_all_beliefs(
 
     return updated_beliefs
 
-# stuffhutenoahusnteo
+
+#====================SEARCH STUFF==========================================
+
+from lib_piglet.utils.tools import eprint
+from lib_piglet.search import tree_search, graph_search,base_search,search_node, iterative_deepening,graph_search_anytime
+from lib_piglet.utils.data_structure import queue,stack,bin_heap
+from lib_piglet.expanders.base_expander import base_expander
+from lib_piglet.solution.solution import solution_to_state_list
+
+debug = False
+
+def getPossibleActions(pos, walls):
+    possible = []
+    x, y = pos
+    x_int, y_int = int(x + 0.5), int(y + 0.5)
+
+    for dir, vec in Actions._directionsAsList:
+        dx, dy = vec
+        next_y = y_int + dy
+        next_x = x_int + dx
+        if not walls[next_x][next_y]: possible.append(dir)
+
+    return possible
+
+class PacAct():
+    def __init__(self, cost):
+        self.cost_ = cost
+
+# The search state is a tuple of location and interception time from path start
+# (x, y, int), with the default value for int being -1
+    
+class pacman_expander(base_expander):
+
+    def __init__(self, gameState: GameState, agent: MixedAgent, max_timestep=9999):
+        self.domain_ = agent
+        self.domain_.is_goal = lambda node, goals: any(all(node[i] == goal[i] for i in range(2))
+                                                      for goal in goals)
+        self.gameState = gameState
+        self.succ_: list = []
+        self.max_timestep = max_timestep
+        self.verbose = False
+
+
+    def expand(self, current_node: search_node):
+        self.succ_.clear()
+        state = current_node.state_
+        x, y, inter = state
+        pos = (x, y)
+        walls = self.gameState.getWalls()
+        successors_acts = []
+
+        valid_transitions = getPossibleActions(pos, walls)
+        if self.verbose:
+            print(f"currently at cell {state[:2]}")
+
+        for act in valid_transitions:
+            new_pos = Actions.getSuccessor(pos, act)
+            if self.verbose:
+                print(f"    looking at transition to {new_pos}")
+            # check if new position is a junction
+            if new_pos in MixedAgent.MAP_TOPOLOGY.junctions:
+                # we need to check for interception
+                _, adv = MixedAgent.CURRENT_ADVANTAGES[new_pos]
+                # intercept time is -1 until an interception is detected.
+                # subsequent successors will all have the same intercept time
+                # adv actually means something different in home territory.
+                # >= 0 means we still have a junction in our grasp.
+                # < 0 means something has slipped through.
+
+                # we still have adv / we've already been intercepted / 0 adv and in home
+                if adv > 0 or \
+                   inter >= 0 or \
+                   (adv == 0 and self.domain_.isInHome(new_pos, self.gameState)):
+                    successors_acts.append(((*new_pos, inter), PacAct(1)))
+                # we just got intercepted/slipped past
+                else:
+                    successors_acts.append(((*new_pos, current_node.g_+ (adv // 2) + 1), PacAct(1)))    
+            else:
+                successors_acts.append(((*new_pos, inter), PacAct(1)))
+                
+        return successors_acts
+
+    def __str__(self):
+        return self.domain_.domain_file_
+
+# = true_maze_dist + (99999 - intercept_time) IF intercept time >= 0
+# ELSE = true_maze_dist
+# should be used when finding food, calculating escape path, etc...
+# ALWAYS PASS IN AN ITERABLE OF GOAL STATES
+def offensive_heuristic(domain: MixedAgent, current_state, goal_state):
+    agent = domain
+    dist = min(agent.getMazeDistance(current_state[:2], g_state[:2])
+               for g_state in goal_state)
+    inter_time = current_state[-1]
+    if inter_time >= 0:
+        dist += 99999 - inter_time
+    return dist
+
+from collections.abc import Iterable
+
+def get_path(start: tuple, goals: Iterable, agent: MixedAgent, gameState: GameState, 
+             heuristic, max_timestep: int = None):
+
+    if not hasattr(get_path, "pac_searcher"):
+        open_lst = bin_heap(search_node.compare_node_f)
+        get_path.pac_searcher = graph_search.graph_search(open_lst,
+                                                           expander=pacman_expander(gameState, agent), 
+                                                           heuristic_function=heuristic)
+    else:
+        get_path.pac_searcher.expander_.domain_ = agent
+        get_path.pac_searcher.expander_.gameState = gameState
+
+
+    assert isinstance(goals[0], Iterable), "goals should be an iterable of state tuples"
+        
+    path = get_path.pac_searcher.get_path((*start, -1), goals)
+    assert path is not None, "didn't find any valid paths? this should not happen"
+
+    path = path.paths_
+    print(path)
+    path = [state.state_[0:2] for state in path]
+    print(get_path.pac_searcher.get_statistic())
+    return path
