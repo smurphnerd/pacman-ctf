@@ -433,7 +433,6 @@ class MixedAgent(CaptureAgent):
     ) -> List[Tuple[str, Tuple]]:
         pos = gameState.getAgentPosition(self.index)
         # Find an attack if possible
-        start = time.time()
         if highLevelAction == "default-attack":
             heuristic = offensive_heuristic
             goals = []
@@ -485,6 +484,85 @@ class MixedAgent(CaptureAgent):
                 # info. can simulate this by just decreasing all adv by 1
                 # beliefs = update_all_beliefs(MixedAgent.OPPONENT_BELIEFS, successor,
                 #                             (self.index + 1) % 4)
+
+                succ_pos = successor.getAgentPosition(self.index)
+
+                if any(
+                    succ_pos == gameState.getAgentPosition(i)
+                    for i in self.getOpponents(gameState)
+                ):
+                    return [(action, successor.getAgentPosition(self.index))]
+
+                for i in self.getOpponents(gameState):
+                    opp_pos = successor.getAgentPosition(i)
+                    if (
+                        isinstance(opp_pos, tuple)
+                        and opp_pos in MixedAgent.MAP_TOPOLOGY.dead_end_zones
+                    ):
+                        exit_pos = MixedAgent.MAP_TOPOLOGY.dead_end_zones[opp_pos]
+
+                        # We are at the exit already or in a dead end
+                        if pos == exit_pos or (
+                            pos in MixedAgent.MAP_TOPOLOGY.dead_end_zones
+                            and MixedAgent.MAP_TOPOLOGY.dead_end_zones[pos] == exit_pos
+                        ):
+                            # If corridor, follow corridor
+                            if opp_pos in MixedAgent.MAP_TOPOLOGY.tile_to_corridor or (
+                                opp_pos in MixedAgent.MAP_TOPOLOGY.junctions
+                                and MixedAgent.MAP_TOPOLOGY.junctions[
+                                    opp_pos
+                                ].junction_type
+                                == "dead_end"
+                            ):
+                                if opp_pos in MixedAgent.MAP_TOPOLOGY.junctions:
+                                    target = MixedAgent.MAP_TOPOLOGY.junctions[
+                                        opp_pos
+                                    ].pos
+                                else:
+                                    corridor_id = MixedAgent.MAP_TOPOLOGY.tile_to_corridor[
+                                        opp_pos
+                                    ]
+                                    corridor = MixedAgent.MAP_TOPOLOGY.corridors[
+                                        corridor_id
+                                    ]
+                                    junction_a = MixedAgent.MAP_TOPOLOGY.junctions[
+                                        corridor.junction_a
+                                    ]
+                                    junction_b = MixedAgent.MAP_TOPOLOGY.junctions[
+                                        corridor.junction_b
+                                    ]
+                                    target = (
+                                        junction_a.pos
+                                        if junction_a.junction_type == "dead_end"
+                                        else junction_b.pos
+                                    )
+
+                                current_distance = self.getMazeDistance(pos, target)
+                                next_distance = self.getMazeDistance(succ_pos, target)
+                                if next_distance < current_distance:
+                                    return [(action, succ_pos)]
+                            else:
+                                # Stay put
+                                return [
+                                    (
+                                        Directions.STOP,
+                                        gameState.getAgentPosition(self.index),
+                                    )
+                                ]
+                        # Check if we can reach the exit before the opponent
+                        elif self.getMazeDistance(
+                            succ_pos, exit_pos
+                        ) <= self.getMazeDistance(opp_pos, exit_pos):
+                            if self.getMazeDistance(
+                                succ_pos, exit_pos
+                            ) < self.getMazeDistance(pos, exit_pos):
+                                return [
+                                    (
+                                        action,
+                                        succ_pos,
+                                    )
+                                ]
+
                 advantages = self.calculate_advantages(successor)  # beliefs)
 
                 positive_count = 0
@@ -542,7 +620,6 @@ class MixedAgent(CaptureAgent):
                         actual_best = (action, next_pos)
                         best_min_dist = min_dist
 
-            print(time.time() - start)
             return [actual_best]
 
         elif highLevelAction == "prevent-escape":
