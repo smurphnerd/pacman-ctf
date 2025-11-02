@@ -454,35 +454,69 @@ class MixedAgent(CaptureAgent):
             else:
                 goals = list(self.getFoodJunctions().keys())
 
-            # TODO: I think we need this to return if this is a clear/conflicting path
-            # If it's clear, we can just return the full path
-            # If we're going to die, we need to reevaluate the goal
-            path = get_path(pos, goals, self, gameState, heuristic)
+            # TODO: If we're going to die, we need to reevaluate the goal
+            path, intercept_t = get_path(pos, goals, self, gameState, heuristic)
 
         elif highLevelAction == "escape":
             heuristic = offensive_heuristic
             goals = self.getEscapePoints()
             # TODO: same thing here
-            path = get_path(pos, goals, self, gameState, heuristic)
+            path, intercept_t = get_path(pos, goals, self, gameState, heuristic)
 
         elif highLevelAction == "defend":
             best_action, best_next_pos, max_advantage = Directions.STOP, pos, 0.0
+            max_positive_count = -1
+            best_next = []
 
             legalActions = gameState.getLegalActions(self.index)
             for action in legalActions:
                 successor = self.getSuccessor(gameState, action)
-                advantages = self.calculate_advantages(gameState)
+                if successor.getAgentState(self.index).isPacman:
+                    print("cont")
+                    continue
+                # we also need to propagate opponent positions with no additional
+                # info. can simulate this by just decreasing all adv by 1
+                advantages = self.calculate_advantages(successor)
                 total_advantage = 0.0
+                positive_count = 0
 
                 for food in self.getFoodYouAreDefending():
-                    total_advantage += advantages[food][-1]
+                    total_advantage += (advantages[food][-1] - 1)
+                    positive_count += int(advantages[food][-1] - 1 >= 0)
+                    
+                # order of priority: maximize number of non-neg adv -> maximize adv
+                if positive_count > max_positive_count: #or \
+                   #(positive_count == max_positive_count and total_advantage > max_advantage):
+                    best_next = [(action, successor.getAgentPosition(self.index),)]
+                    max_positive_count = positive_count
+                    max_advantage = total_advantage
+                elif positive_count == max_positive_count: # and total_advantage == max_advantage:
+                    best_next.append((action, successor.getAgentPosition(self.index),))
+                
+                #print(action)
+                #print(total_advantage)
+                #print(positive_count)
+            
+            # TODO: tie break getting closest to any enemy positions
+            actual_best = best_next[0]
+            width, height = self.walls.width, self.walls.height
+            if len(best_next) > 1:
+                best_min_dist = 9999
+                ops = self.getOpponents(gameState)
+                enemy_poss = [(x, y) for x in range(width) for y in range(height)
+                              if MixedAgent.OPPONENT_BELIEFS[ops[0]][x][y] or
+                                 MixedAgent.OPPONENT_BELIEFS[ops[1]][x][y]]
+                for action, next_pos in best_next:
+                    min_dist = min(self.getMazeDistance(next_pos, e_pos) for e_pos
+                                   in enemy_poss)
+                    if min_dist <= best_min_dist:
+                        print(min_dist)
+                        print(action, next_pos)
+                        actual_best = (action, next_pos)
+                        best_min_dist = min_dist
+                    
 
-                if total_advantage > max_advantage:
-                    best_action = action
-                    best_next_pos = successor.getAgentPosition(self.index)
-                    best_action = action
-
-            return [(best_action, best_next_pos)]
+            return [actual_best]
 
         elif highLevelAction == "prevent-escape":
             best_action, best_next_pos, max_advantage = Directions.STOP, pos, 0.0
@@ -518,12 +552,11 @@ class MixedAgent(CaptureAgent):
 
     def calculate_advantages(self, gameState: GameState):
         """
-        Finds the current advantages at each junct: {(x, y) : (((ally_idx, dist), (ally2_idx, dist)), num_adv)
+        Finds the current advantages at each cell: {(x, y) : (((ally_idx, dist), (ally2_idx, dist)), num_adv)
         """
         walls = gameState.getWalls()
         width, height = walls.width, walls.height
 
-        junctions = MixedAgent.MAP_TOPOLOGY.junctions
         advantages = (
             {}
         )  # {(junct_x, junct_y) : (((ally_idx, dist), (ally2_idx, dist)), num_adv)}
@@ -538,17 +571,20 @@ class MixedAgent(CaptureAgent):
                     if belief[x][y]:
                         enemy_pos.add((x, y))
 
-        for junct in junctions:
-            team_distances = tuple(
-                (idx, self.getMazeDistance(pos, junct)) for idx, pos in team_pos
-            )
-            min_team_distance = min(dist for _, dist in team_distances)
-            adv = (
-                min(self.getMazeDistance(pos, junct) for pos in enemy_pos)
-                - min_team_distance
-            )
+        for x in range(width):
+            for y in range(height):
+                node_pos = (x, y)
+                if not walls[x][y]:
+                    team_distances = tuple(
+                        (idx, self.getMazeDistance(pos, node_pos)) for idx, pos in team_pos
+                    )
+                    min_team_distance = min(dist for _, dist in team_distances)
+                    adv = (
+                        min(self.getMazeDistance(pos, node_pos) for pos in enemy_pos)
+                        - min_team_distance
+                    )
 
-            advantages[junct] = (team_distances, adv)
+                    advantages[node_pos] = (team_distances, adv)
 
         return advantages
 
@@ -1458,30 +1494,26 @@ class pacman_expander(base_expander):
             new_pos = Actions.getSuccessor(pos, act)
             if self.verbose:
                 print(f"    looking at transition to {new_pos}")
-            # check if new position is a junction
-            if new_pos in MixedAgent.MAP_TOPOLOGY.junctions:
-                # we need to check for interception
-                _, adv = MixedAgent.CURRENT_ADVANTAGES[new_pos]
-                # intercept time is -1 until an interception is detected.
-                # subsequent successors will all have the same intercept time
-                # adv actually means something different in home territory.
-                # >= 0 means we still have a junction in our grasp.
-                # < 0 means something has slipped through.
 
-                # we still have adv / we've already been intercepted / 0 adv and in home
-                if (
-                    adv > 0
-                    or inter >= 0
-                    or (adv == 0 and self.domain_.isInHome(new_pos, self.gameState))
-                ):
-                    successors_acts.append(((*new_pos, inter), PacAct(1)))
-                # we just got intercepted/slipped past
-                else:
-                    successors_acts.append(
-                        ((*new_pos, current_node.g_ + (adv // 2) + 1), PacAct(1))
-                    )
-            else:
+            # we need to check for interception
+            _, adv = MixedAgent.CURRENT_ADVANTAGES[new_pos]
+            # intercept time is -1 until an interception is detected.
+            # subsequent successors will all have the same intercept time
+
+            # we still have adv / we've already been intercepted
+            if (
+                adv > 0
+                or inter >= 0
+                #or (adv == 0 and self.domain_.isInHome(new_pos, self.gameState))
+            ):
                 successors_acts.append(((*new_pos, inter), PacAct(1)))
+            # we just got intercepted
+            else:
+                successors_acts.append(
+                    ((*new_pos, current_node.g_ + (adv // 2) + 1), PacAct(1))
+                )
+        else:
+            successors_acts.append(((*new_pos, inter), PacAct(1)))
 
         return successors_acts
 
@@ -1515,6 +1547,7 @@ def get_path(
     heuristic,
     max_timestep: int = None,
 ):
+    """Returns path and time until intercept. time = -1 if not intercepted"""
     if not hasattr(get_path, "pac_searcher"):
         open_lst = bin_heap(search_node.compare_node_f)
         get_path.pac_searcher = graph_search.graph_search(
@@ -1533,6 +1566,8 @@ def get_path(
 
     path = path.paths_
     print(path)
+    intercept_t = path[-1].state_[-1]
+
     path = [state.state_[0:2] for state in path]
     print(get_path.pac_searcher.get_statistic())
-    return path
+    return path, intercept_t
