@@ -435,6 +435,7 @@ class MixedAgent(CaptureAgent):
     ) -> List[Tuple[str, Tuple]]:
         pos = gameState.getAgentPosition(self.index)
         # Find an attack if possible
+        start = time.time()
         if highLevelAction == "default-attack":
             heuristic = offensive_heuristic
             goals = []
@@ -467,22 +468,26 @@ class MixedAgent(CaptureAgent):
             best_action, best_next_pos, max_advantage = Directions.STOP, pos, 0.0
             max_positive_count = -1
             best_next = []
+            def_enemy_pos = tuple(gameState.getAgentPosition(i) 
+                                  for i in self.getOpponents(gameState))
 
             legalActions = gameState.getLegalActions(self.index)
             for action in legalActions:
                 successor = self.getSuccessor(gameState, action)
                 if successor.getAgentState(self.index).isPacman:
-                    print("cont")
                     continue
                 # we also need to propagate opponent positions with no additional
                 # info. can simulate this by just decreasing all adv by 1
-                advantages = self.calculate_advantages(successor)
+                #beliefs = update_all_beliefs(MixedAgent.OPPONENT_BELIEFS, successor,
+                #                             (self.index + 1) % 4)
+                advantages = self.calculate_advantages(successor) #beliefs)
+
                 total_advantage = 0.0
                 positive_count = 0
 
                 for food in self.getFoodYouAreDefending():
-                    total_advantage += (advantages[food][-1] - 1)
-                    positive_count += int(advantages[food][-1] - 1 >= 0)
+                    total_advantage += (advantages[food][-1])
+                    positive_count += int(advantages[food][-1] >= 0)
                     
                 # order of priority: maximize number of non-neg adv -> maximize adv
                 if positive_count > max_positive_count: #or \
@@ -500,22 +505,24 @@ class MixedAgent(CaptureAgent):
             # TODO: tie break getting closest to any enemy positions
             actual_best = best_next[0]
             width, height = self.walls.width, self.walls.height
+            uncertain = lambda x: x < 1 and x > 0.01
             if len(best_next) > 1:
                 best_min_dist = 9999
                 ops = self.getOpponents(gameState)
                 enemy_poss = [(x, y) for x in range(width) for y in range(height)
-                              if MixedAgent.OPPONENT_BELIEFS[ops[0]][x][y] or
-                                 MixedAgent.OPPONENT_BELIEFS[ops[1]][x][y]]
+                              if uncertain(max(MixedAgent.OPPONENT_BELIEFS[ops[0]][x][y],
+                                           MixedAgent.OPPONENT_BELIEFS[ops[1]][x][y]))]
+                if len(enemy_poss) == 0:
+                    actual_best = random.choice(best_next)
+                    return [actual_best]
                 for action, next_pos in best_next:
                     min_dist = min(self.getMazeDistance(next_pos, e_pos) for e_pos
                                    in enemy_poss)
                     if min_dist <= best_min_dist:
-                        print(min_dist)
-                        print(action, next_pos)
                         actual_best = (action, next_pos)
                         best_min_dist = min_dist
                     
-
+            print(time.time() - start)
             return [actual_best]
 
         elif highLevelAction == "prevent-escape":
@@ -550,12 +557,15 @@ class MixedAgent(CaptureAgent):
         else:
             return successor
 
-    def calculate_advantages(self, gameState: GameState):
+    def calculate_advantages(self, gameState: GameState, beliefs: dict = None):
         """
         Finds the current advantages at each cell: {(x, y) : (((ally_idx, dist), (ally2_idx, dist)), num_adv)
         """
         walls = gameState.getWalls()
         width, height = walls.width, walls.height
+
+        if not beliefs:
+            beliefs = MixedAgent.OPPONENT_BELIEFS
 
         advantages = (
             {}
@@ -565,7 +575,7 @@ class MixedAgent(CaptureAgent):
         )
         enemy_pos = set()
         for op in self.getOpponents(gameState):
-            belief = MixedAgent.OPPONENT_BELIEFS[op]
+            belief = beliefs[op]
             for x in range(width):
                 for y in range(height):
                     if belief[x][y]:
