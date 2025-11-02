@@ -482,27 +482,21 @@ class MixedAgent(CaptureAgent):
                 #                             (self.index + 1) % 4)
                 advantages = self.calculate_advantages(successor) #beliefs)
 
-                total_advantage = 0.0
                 positive_count = 0
 
                 for food in self.getFoodYouAreDefending():
-                    total_advantage += (advantages[food][-1])
-                    positive_count += int(advantages[food][-1] >= 0)
-                    
+                    positive_count += int(self.get_advantage(food, gameState, advantages)
+                                        >= 0)
+                
                 # order of priority: maximize number of non-neg adv -> maximize adv
                 if positive_count > max_positive_count: #or \
                    #(positive_count == max_positive_count and total_advantage > max_advantage):
                     best_next = [(action, successor.getAgentPosition(self.index),)]
                     max_positive_count = positive_count
-                    max_advantage = total_advantage
                 elif positive_count == max_positive_count: # and total_advantage == max_advantage:
                     best_next.append((action, successor.getAgentPosition(self.index),))
-                
-                #print(action)
-                #print(total_advantage)
-                #print(positive_count)
+
             
-            # TODO: tie break getting closest to any enemy positions
             actual_best = best_next[0]
             width, height = self.walls.width, self.walls.height
             uncertain = lambda x: x < 1 and x > 0.01
@@ -559,7 +553,7 @@ class MixedAgent(CaptureAgent):
 
     def calculate_advantages(self, gameState: GameState, beliefs: dict = None):
         """
-        Finds the current advantages at each cell: {(x, y) : (((ally_idx, dist), (ally2_idx, dist)), num_adv)
+        Finds the current advantages at each cell: {(x, y) : (agent_1 dist, agent_2 dist, ...))
         """
         walls = gameState.getWalls()
         width, height = walls.width, walls.height
@@ -573,30 +567,42 @@ class MixedAgent(CaptureAgent):
         team_pos = tuple(
             (idx, gameState.getAgentPosition(idx)) for idx in self.getTeam(gameState)
         )
-        enemy_pos = set()
+        enemy_pos = {}
         for op in self.getOpponents(gameState):
             belief = beliefs[op]
+            enemy_pos[op] = set()
             for x in range(width):
                 for y in range(height):
                     if belief[x][y]:
-                        enemy_pos.add((x, y))
+                        enemy_pos[op].add((x, y))
 
         for x in range(width):
             for y in range(height):
                 node_pos = (x, y)
                 if not walls[x][y]:
-                    team_distances = tuple(
-                        (idx, self.getMazeDistance(pos, node_pos)) for idx, pos in team_pos
-                    )
-                    min_team_distance = min(dist for _, dist in team_distances)
-                    adv = (
-                        min(self.getMazeDistance(pos, node_pos) for pos in enemy_pos)
-                        - min_team_distance
-                    )
-
-                    advantages[node_pos] = (team_distances, adv)
+                    advantages[node_pos] = []
+                    for idx in range(4):
+                        if idx in self.getTeam(gameState):
+                            advantages[node_pos].append(self.getMazeDistance(gameState.getAgentPosition(idx), node_pos))
+                        else:
+                            min_enemy_dist = min(self.getMazeDistance(pos, node_pos) 
+                                                 for pos in enemy_pos[idx])
+                            advantages[node_pos].append(min_enemy_dist)
 
         return advantages
+    
+    def get_advantage(self, pos, gameState, advantages, teammate=None, enemy=None):
+        if not teammate:
+            teammate = self.getTeam(gameState)
+        else:
+            teammate = (teammate,)
+        if not enemy:
+            enemy = self.getOpponents(gameState)
+        else:
+            enemy = (enemy,)
+        
+        return min(advantages[pos][op] for op in enemy) - \
+            min(advantages[pos][tm] for tm in teammate)
 
     def _find_junctions_for_items(
         self, items: List[Tuple[int, int]], topology: MapTopology
@@ -1506,15 +1512,16 @@ class pacman_expander(base_expander):
                 print(f"    looking at transition to {new_pos}")
 
             # we need to check for interception
-            _, adv = MixedAgent.CURRENT_ADVANTAGES[new_pos]
+            adv = self.domain_.get_advantage(new_pos, self.gameState, 
+                                             MixedAgent.CURRENT_ADVANTAGES)
             # intercept time is -1 until an interception is detected.
             # subsequent successors will all have the same intercept time
 
             # we still have adv / we've already been intercepted
             if (
-                adv > 0
-                or inter >= 0
-                #or (adv == 0 and self.domain_.isInHome(new_pos, self.gameState))
+                adv > 0 or \
+                self.domain_.isInHome(new_pos, self.gameState) or \ 
+                inter >= 0
             ):
                 successors_acts.append(((*new_pos, inter), PacAct(1)))
             # we just got intercepted
