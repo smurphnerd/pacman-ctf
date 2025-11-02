@@ -37,14 +37,6 @@ from collections import defaultdict, namedtuple
 
 
 @dataclass
-class StateInfo:
-    gameState: GameState
-    agentState: AgentState
-    teammateState: AgentState
-    enemyVirtualStates: Dict[int, AgentState]
-
-
-@dataclass
 class Junction:
     """Represents a strategic node (junction or dead-end) in the map"""
 
@@ -122,76 +114,26 @@ class MixedAgent(CaptureAgent):
     This is an agent that use pddl to guide the high level actions of Pacman
     """
 
-    # Default weights for q learning, if no QLWeights.txt find, we use the following weights.
-    # You should add your weights for new low level planner here as well.
-    # weights are defined as class attribute here, so taht agents share same weights.
-    QLWeights = {
-        "attackWeights": {
-            "got-eaten": -1000000,  # Priority -1 (less better) - CRITICAL: got eaten
-            "breathing-distance-ghosts": -10000,  # Priority 1 (less better) - CRITICAL: avoid ghosts
-            "in-enemy-territory": 1000,  # Priority 2 (more better) - main goal
-            "close-distance-ghosts": -500,  # Priority 2 (less better) - CRITICAL: avoid ghosts
-            "distance-to-enemy-territory": -100,  # Priority 3 (closer better) - guide to border
-            "distance-to-teammate": 10,  # Priority 4 (further better) - spread out
-            "stop-reverse": -5,
-        },
-        "eatFoodWeights": {
-            "got-eaten": -1000000,  # Priority -1 (less better) - CRITICAL: got eaten
-            "breathing-distance-ghosts": -100000,  # Priority 0 (less better) - CRITICAL: avoid ghosts
-            # "in-enemy-territory": 10000,  # Priority 1 (more better) - MUST be in enemy territory
-            "ate-food": 5000,  # Priority 2 - big reward for eating
-            "distance-to-nearest-food": -100,  # Priority 3 (closer better) - guide to food
-            "close-distance-ghosts": -10,  # Priority 4 (less better) - minor ghost avoidance
-            "distance-to-attacking-teammate": 90,  # Priority 5 (closer better) - guide to attacking teammate
-            "stop-reverse": -5,
-        },
-        "eatCapsuleWeights": {
-            "got-eaten": -1000000,  # Priority -1 (less better) - CRITICAL: got eaten
-            "breathing-distance-ghosts": -10000,  # Priority 1 (less better) - CRITICAL: avoid ghosts
-            # "in-enemy-territory": 100000,  # Priority 0 (more better) - MUST be in enemy territory
-            "ate-capsule": 100000,  # Priority 2 - big reward for eating capsule
-            "distance-to-nearest-capsule": -100,  # Priority 3 (closer better) - guide to capsule
-            "close-distance-ghosts": -10,  # Priority 4 (less better) - minor ghost avoidance
-            "stop-reverse": -5,
-        },
-        "escapeWeights": {
-            "got-eaten": -1000000,  # Priority -1 (less better) - CRITICAL: got eaten
-            "in-home": 10000,  # Priority 1 - CRITICAL: get home safely
-            "breathing-distance-ghosts": -1000,  # Priority 2 (less better) - avoid immediate danger
-            "distance-to-home": -1000,  # Priority 2 - get home quickly
-            "close-distance-ghosts": -100,  # Priority 3 (less better) - avoid nearby ghosts
-            "stop-reverse": -5,
-        },
-        "chaseWeights": {
-            "got-eaten": -1000000,  # Priority -1 (less better) - CRITICAL: got eaten
-            "ate_enemy": 1000000,
-            # "in-home": 100000,  # Priority 1 - MUST stay in home territory
-            "distance-to-enemy": -1000,  # Priority 2 (closer better) - get to target
-            "between-enemy-and-escape": 100,  # Priority 3 - intercept bonus
-            "distance-to-teammate": 10,  # Priority 4 (further better) - spread out
-            "stop-reverse": -5,
-        },
-        "defaultDefendWeights": {
-            "got-eaten": -1000000,  # Priority -1 (less better) - CRITICAL: got eaten
-            "in-home": 100000,  # Priority 1 - MUST stay in home territory
-            "distance-to-nearest-enemy": -1000,  # Priority 2 (closer better) - position near threats
-            "distance-to-teammate": 10,  # Priority 3 (further better) - spread out
-            "distance-to-teammate-both-defending": 900,  # Priority 4 (further better) - spread out
-            # "stop-reverse": -5,
-        },
-    }
-
     # Also can use class variable to exchange information between agents.
     CURRENT_ACTION = {}
     ESTIMATED_POSITIONS = {}  # Cache for estimated enemy positions using beliefs
-    CONSECUTIVE_STOP_REVERSE = {}  # Tracks consecutive stop/reverse moves per agent
-    DEFENSIVE_ASSIGNMENTS = defaultdict(int)
-    NUM_GAMES = 0
     MAP_TOPOLOGY: MapTopology = None  # Cached topological map analysis
-    CURRENT_ADVANTAGES = {} # Cache for current distance advantage on junctions
+    CURRENT_ADVANTAGES = {}  # Cache for current distance advantage on junctions
     CURRENT_LAYOUT_STR = (
         None  # String representation of current layout for cache invalidation
     )
+    RED_FOOD = []
+    RED_CAPSULES = []
+    BLUE_FOOD = []
+    BLUE_CAPSULES = []
+    RED_FOOD_JUNCTIONS = util.Counter()
+    RED_CAPSULE_JUNCTIONS = util.Counter()
+    BLUE_FOOD_JUNCTIONS = util.Counter()
+    BLUE_CAPSULE_JUNCTIONS = util.Counter()
+    RED_FOOD_CORRIDORS = set()
+    RED_CAPSULE_CORRIDORS = set()
+    BLUE_FOOD_CORRIDORS = set()
+    BLUE_CAPSULE_CORRIDORS = set()
 
     def registerInitialState(self, gameState: GameState):
         self.pddl_solver = pddl_solver(BASE_FOLDER + "/myTeam.pddl")
@@ -211,14 +153,6 @@ class MixedAgent(CaptureAgent):
 
         self.lowLevelPlan: List[Tuple[str, Tuple]] = []
         self.lowLevelActionIndex = 0
-
-        # Initialize consecutive stop/reverse counter for this agent
-        MixedAgent.CONSECUTIVE_STOP_REVERSE[self.index] = 0
-
-        # Create a defensive distance calculator that treats enemy territory as walls
-        # This helps defensive agents find optimal patrol positions at the border
-        self.defensiveDistancer = self.createDefensiveDistancer(gameState)
-        self.defensiveDistancer.getMazeDistances()
 
         self.debug = True
 
@@ -252,21 +186,24 @@ class MixedAgent(CaptureAgent):
         # Check if layout has changed or topology not yet built
         layout_str = str(gameState.data.layout)
 
+        self.walls = gameState.getWalls()
+
         if MixedAgent.CURRENT_LAYOUT_STR != layout_str:
             # New layout detected - rebuild topology
-            walls = gameState.getWalls()
-            MixedAgent.MAP_TOPOLOGY = build_map_topology(walls)
+            MixedAgent.MAP_TOPOLOGY = build_map_topology(self.walls)
             MixedAgent.CURRENT_LAYOUT_STR = layout_str
 
             if self.debug:
                 print(f"\nAgent {self.index}: Built map topology for new layout")
-                visualize_topology(MixedAgent.MAP_TOPOLOGY, walls)
+                visualize_topology(MixedAgent.MAP_TOPOLOGY, self.walls)
 
         # Initialize values for distance advantage at all junctions
         MixedAgent.CURRENT_ADVANTAGES = self.calculate_advantages(gameState)
 
         # Use a dictionary to save information about current agent.
         MixedAgent.CURRENT_ACTION[self.index] = {}
+
+        self.update_critical_junctions(gameState)
 
     def final(self, gameState: GameState):
         """
@@ -334,66 +271,58 @@ class MixedAgent(CaptureAgent):
         # Update advantages at all junctions
         self.calculate_advantages(gameState)
 
+        # Find critical attacking and defending junctions
+        self.update_critical_junctions(gameState)
+
+        # TODO uncomment
         # -------------High Level Plan Section-------------------
         # Get high level action from a pddl plan.
 
         # Collect objects and init states from gameState
-        objects, initState = self.get_pddl_state(gameState)
-        positiveGoal, negtiveGoal = self.getGoals(objects, initState)
-
-        # Check if we can stick to current plan
-        if not self.stateSatisfyCurrentPlan(initState, positiveGoal, negtiveGoal):
-            # Cannot stick to current plan, prepare goals and replan
-            if self.debug:
-                print(f"Agent {self.index} replanning:")
-                print(f"  Positive Goal: {positiveGoal}")
-                print(f"  Negative Goal: {negtiveGoal}")
-            self.highLevelPlan: List[Tuple[Action, pddl_state]] = self.getHighLevelPlan(
-                objects, initState, positiveGoal, negtiveGoal
-            )  # Plan is a list Action and pddl_state
-            self.currentActionIndex = 0
-            self.lowLevelPlan = []  # reset low level plan
-            self.currentNegativeGoalStates = negtiveGoal
-            self.currentPositiveGoalStates = positiveGoal
-            if self.debug:
-                print(f"  Plan: {[action.name for action, _ in self.highLevelPlan]}")
-
-        if not self.highLevelPlan:
-            if self.debug:
-                print(f"No plan found for predicates: {initState}")
-            highLevelAction = Action("default_defend", None, [], [], [], [])
-        else:
-            # Get next action from the plan
-            highLevelAction = self.highLevelPlan[self.currentActionIndex][0]
-        MixedAgent.CURRENT_ACTION[self.index] = highLevelAction
-
-        if self.debug:
-            print(f"Agent {self.index}: High-Level Action = {highLevelAction.name}")
-
-        if highLevelAction.name != "default_defend":
-            MixedAgent.DEFENSIVE_ASSIGNMENTS[self.index] = -1
+        # objects, initState = self.get_pddl_state(gameState)
+        # positiveGoal, negtiveGoal = self.getGoals(objects, initState)
+        #
+        # # Check if we can stick to current plan
+        # if not self.stateSatisfyCurrentPlan(initState, positiveGoal, negtiveGoal):
+        #     # Cannot stick to current plan, prepare goals and replan
+        #     if self.debug:
+        #         print(f"Agent {self.index} replanning:")
+        #         print(f"  Positive Goal: {positiveGoal}")
+        #         print(f"  Negative Goal: {negtiveGoal}")
+        #     self.highLevelPlan: List[Tuple[Action, pddl_state]] = self.getHighLevelPlan(
+        #         objects, initState, positiveGoal, negtiveGoal
+        #     )  # Plan is a list Action and pddl_state
+        #     self.currentActionIndex = 0
+        #     self.lowLevelPlan = []  # reset low level plan
+        #     self.currentNegativeGoalStates = negtiveGoal
+        #     self.currentPositiveGoalStates = positiveGoal
+        #     if self.debug:
+        #         print(f"  Plan: {[action.name for action, _ in self.highLevelPlan]}")
+        #
+        # if not self.highLevelPlan:
+        #     if self.debug:
+        #         print(f"No plan found for predicates: {initState}")
+        #     highLevelAction = Action("default_defend", None, [], [], [], [])
+        # else:
+        #     # Get next action from the plan
+        #     highLevelAction = self.highLevelPlan[self.currentActionIndex][0]
+        # MixedAgent.CURRENT_ACTION[self.index] = highLevelAction
+        #
+        # if self.debug:
+        #     print(f"Agent {self.index}: High-Level Action = {highLevelAction.name}")
+        #
+        # if highLevelAction.name != "default_defend":
+        #     MixedAgent.DEFENSIVE_ASSIGNMENTS[self.index] = -1
 
         # -------------Low Level Plan Section-------------------
         # Get the low level plan using Q learning, and return a low level action at last.
         # A low level action is defined in Directions, whihc include {"North", "South", "East", "West", "Stop"}
 
         if not self.posSatisfyLowLevelPlan(gameState):
-            if highLevelAction.name in ["eat_food"]:
-                self.lowLevelPlan = self.getLowLevelPlanHS(
-                    gameState, highLevelAction.name
-                )
-                # Fallback to Q-learning if heuristic search returns no plan
-                if not self.lowLevelPlan:
-                    if self.debug:
-                        print(f"Agent {self.index}: HS planner failed, using QL fallback")
-                    self.lowLevelPlan = self.getLowLevelPlanQL(
-                        gameState, highLevelAction.name
-                    )
-            else:
-                self.lowLevelPlan = self.getLowLevelPlanQL(
-                    gameState, highLevelAction.name
-                )  # Generate low level plan with q learning
-                # you can replace the getLowLevelPlanQL with getLowLevelPlanHS and implement heuristic search planner
+            # TODO just hardcoding defend for now
+            self.lowLevelPlan = self.getLowLevelPlanHS(
+                gameState, "defend"
+            )
             self.lowLevelActionIndex = 0
 
         # Safety check in case plan is still empty
@@ -405,19 +334,7 @@ class MixedAgent(CaptureAgent):
         lowLevelAction = self.lowLevelPlan[self.lowLevelActionIndex][0]
         self.lowLevelActionIndex += 1
 
-        # Update consecutive stop/reverse counter
-        agentState = gameState.getAgentState(self.index)
-        is_stop = lowLevelAction == Directions.STOP
-        is_reverse = (
-            lowLevelAction == Directions.REVERSE[agentState.configuration.direction]
-        )
-
-        if is_stop or is_reverse:
-            # Increment counter for consecutive stop/reverse
-            MixedAgent.CONSECUTIVE_STOP_REVERSE[self.index] += 1
-        else:
-            # Reset counter - agent is making a productive move
-            MixedAgent.CONSECUTIVE_STOP_REVERSE[self.index] = 0
+        # TODO: I removed the stop/reverse counter here, not sure if we still want it
 
         # print("\tAgent:", self.index,lowLevelAction)
         return lowLevelAction
@@ -446,157 +363,7 @@ class MixedAgent(CaptureAgent):
         """
         This function collects pddl :objects and :init states from simulator gameState.
         """
-        # Collect objects and states from the gameState
-
-        states = []
-        objects = []
-
-        # Collect available foods on the map
-        myPos = gameState.getAgentPosition(self.index)
-        myObj = f"a{self.index}"
-        opponents = self.getOpponents(gameState)
-
-        # Collect capsule states
-        capsules = self.getCapsules(gameState)
-        for cap in capsules:
-            my_distance = self.getMazeDistance(cap, myPos)
-            opp_closer = False
-            for opp_idx in opponents:
-                opp_pos = MixedAgent.ESTIMATED_POSITIONS.get(opp_idx)
-                assert opp_pos
-                if self.getMazeDistance(cap, opp_pos) < my_distance:
-                    opp_closer = True
-                    break
-            if not opp_closer:
-                states.append(("closest_to_capsule",))
-                break
-
-        # Collect winning states
-        currentScore = gameState.data.score
-        team_score = currentScore if self.red else -currentScore
-        opponent_score = -team_score
-        if team_score > 0:
-            states.append(("winning",))
-        if team_score > self.small_lead_threshold:
-            states.append(("winning_gt3",))
-        if team_score < -self.small_lead_threshold:
-            states.append(("losing_gt3",))
-
-        # Time remaining predicates
-        if hasattr(gameState.data, "timeleft"):
-            if gameState.data.timeleft < 300:
-                states.append(("low_time_remaining",))
-            if gameState.data.timeleft < 100:
-                states.append(("very_low_time_remaining",))
-
-        def add_general_agent_states(agent_state, agent_obj, positive_score):
-            if agent_state.scaredTimer > 0:
-                states.append(("is_scared", agent_obj))
-
-            if agent_state.numCarrying + positive_score > 0:
-                states.append(("fat_agent", agent_obj))
-            if agent_state.numCarrying + positive_score > self.small_lead_threshold:
-                states.append(("fat_agent_gt3", agent_obj))
-            if agent_state.numCarrying + positive_score > self.large_lead_threshold:
-                states.append(("fat_agent_gt10", agent_obj))
-
-            if agent_state.isPacman:
-                states.append(("is_pacman", agent_obj))
-
-        # Check if there is any food nearby
-        food = self.getFood(gameState).asList()
-        if any(self.getMazeDistance(f, myPos) <= CLOSE_DISTANCE for f in food):
-            states.append(("near_food", myObj))
-
-        # Check if there is any food available on enemy side
-        if len(food) > 0:
-            states.append(("food_available",))
-
-        # Collect team agents states
-        agents: List[Tuple[int, AgentState]] = [
-            (i, gameState.getAgentState(i)) for i in self.getTeam(gameState)
-        ]
-        for agent_index, agent_state in agents:
-            agent_object = f"a{agent_index}"
-            agent_type = "current_agent" if agent_index == self.index else "ally"
-            objects += [(agent_object, agent_type)]
-
-            add_general_agent_states(agent_state, agent_object, team_score)
-
-            # Ally coordination predicates
-            if agent_index != self.index and MixedAgent.CURRENT_ACTION.get(agent_index):
-                action = MixedAgent.CURRENT_ACTION.get(agent_index)
-                assert hasattr(action, "name") and hasattr(action, "parameters")
-                if action.name == "chase_enemy":
-                    assert len(action.parameters) == 2
-                    states.append(("ally_chasing", action.parameters[0]))
-                if action.name == "default_defend":
-                    states.append(("ally_defending",))
-
-            pos = agent_state.getPosition()
-            assert pos
-
-            # Check if we are further back
-            if (self.red and myPos[0] < pos[0]) or (not self.red and myPos[0] > pos[0]):
-                states.append(("further_back",))
-
-        my_closest_enemy = float("inf")
-        teammate_closest_enemy = float("inf")
-
-        # Collect enemy agents states
-        enemies: List[Tuple[int, AgentState]] = [
-            (i, gameState.getAgentState(i)) for i in self.getOpponents(gameState)
-        ]
-        noisyDistance = gameState.getAgentDistances()
-        typeIndex = 1
-        for enemy_index, enemy_state in enemies:
-            enemy_object = f"e{enemy_index}"
-            objects += [(enemy_object, "enemy{}".format(typeIndex))]
-
-            add_general_agent_states(enemy_state, enemy_object, opponent_score)
-
-            est_pos = MixedAgent.ESTIMATED_POSITIONS.get(enemy_index)
-            if enemy_state.scaredTimer <= LOW_SCARED_TIMER:
-                distance = self.getMazeDistance(est_pos, myPos)
-                if distance <= BREATHING_DISTANCE:
-                    states.append(("enemy_breathing_distance",))
-                if distance <= CLOSE_DISTANCE:
-                    states.append(("enemy_close_distance",))
-                if distance <= MEDIUM_DISTANCE:
-                    states.append(("enemy_medium_distance",))
-
-            # Check if enemy is carrying food (always visible in AgentState)
-            if enemy_state.numCarrying > 0:
-                states.append(("enemy_carrying_food", enemy_object))
-
-            # Use cached estimated position (computed once at start of chooseAction)
-            estimated_pos = MixedAgent.ESTIMATED_POSITIONS.get(enemy_index)
-            assert estimated_pos
-            if (self.red and estimated_pos[0] <= myPos[0]) or (
-                not self.red and estimated_pos[0] >= myPos[0]
-            ):
-                states.append(("enemy_past", enemy_object))
-
-            # Determine if current agent is closer to this enemy than teammate
-            my_distance = self.getMazeDistance(est_pos, myPos)
-            teammate_pos = gameState.getAgentPosition((self.index + 2) % 4)
-            teammate_distance = self.getMazeDistance(est_pos, teammate_pos)
-
-            if my_distance <= teammate_distance:
-                states.append(("closer_to_enemy", enemy_object))
-
-            if my_distance < my_closest_enemy:
-                my_closest_enemy = my_distance
-            if teammate_distance < teammate_closest_enemy:
-                teammate_closest_enemy = teammate_distance
-
-            typeIndex += 1
-
-        # Check if we're closer to our closest enemy than teammate
-        if my_closest_enemy <= teammate_closest_enemy:
-            states.append(("closer_to_closest_enemy",))
-
-        return objects, states
+        pass
 
     @profile
     def stateSatisfyCurrentPlan(
@@ -646,254 +413,7 @@ class MixedAgent(CaptureAgent):
         Multi-tiered goal prioritization system based on game state.
         Returns positive and negative goal states for PDDL planning.
         """
-        # Fat agent is one that has enough food to take the lead if they cross back
-
-        # If we are ghost these are the orders of priority:
-        # 1. If scared, aggressive attack until the timer runs out (attack)
-        # 2. If there's a fat enemy and we are the closest ghost to it, chase it (the effect in pddl should be "chasing e") (chase e)
-        # 3. If there's a fat enemy and our teammate isn't defending it, chase it (the effect in pddl should be "chasing e") (chase e)
-        # 4. If an enemy is in our territory and we are the closest ghost to it, chase it (the effect in pddl should be "chasing e") (chase e)
-        # 5. If an enemy is in our territory and our teammate isn't defending it, chase it (the effect in pddl should be "chasing e") (chase e)
-        # 6. If we are winning by >3 points, defend default (default)
-        # 6. (There should be no unchased enemies by now) If our teammate is chasing an enemy, then attack (attack)
-        # 7. (There should be no enemies) If our teammate is not attacking and we are closer to the enemy territory, then attack (attack)
-        # 8. If we aren't winning, and our teammate is also not attacking, then attack (attack)
-        # 9. If we are losing by >3 points, attack (attack)
-        # 10. We aren't losing by too much so just defend (default)
-
-        # If we are pacman these are the orders of priority:
-        # 1. If we are the closest out of all enemies to a capsule eat it (eat capsule)
-        # 2. If we don't have enough food to take the lead, keep eating (eat food)
-        # 3. If we have enough food to take the lead and there is no food nearby, escape (escape)
-        # 3. If we have enough to take the lead by >10 points escape (escape)
-        # 4. If we aren't under threat and timer is still high, keep eating (no non-scared ghosts in vacinity) (eat food)
-        # 5. We have enough to take the lead now, just escape
-
-        myObj = f"a{self.index}"
-        is_pacman = ("is_pacman", myObj) in initState
-        is_scared = ("is_scared", myObj) in initState
-
-        # Get enemy objects for chase goals
-        enemy_objects = [obj[0] for obj in objects if obj[1] in ["enemy1", "enemy2"]]
-        # Check if teammate is also pacman
-        teammateObj = f"a{(self.index + 2) % 4}"
-        teammate_is_pacman = ("is_pacman", teammateObj) in initState
-
-        # ==================== PACMAN LOGIC ====================
-        if is_pacman:
-            # Priority -1: No food available - escape immediately to score carried food
-            if not ("food_available",) in initState:
-                if self.debug:
-                    print(f"Agent {self.index}: Pacman - priority -1")
-                return self.goalEscape(objects, initState)
-
-            if is_scared:
-                if self.debug:
-                    print(f"Agent {self.index}: Pacman - priority -0.5")
-                return self.goalEatFood(objects, initState)
-
-            # Priority 0: If both are pacman and enemy in our territory, handle multiple invaders
-            if teammate_is_pacman:
-                # Highest priority: If we're further back and enemy has passed us, intercept immediately
-                if ("further_back",) in initState:
-                    for enemy_obj in enemy_objects:
-                        if ("enemy_past", enemy_obj) in initState and (
-                            "fat_agent_gt10",
-                            enemy_obj,
-                        ) in initState:
-                            if not (("ally_chasing", enemy_obj) in initState):
-                                if self.debug:
-                                    print(f"Agent {self.index}: Pacman - priority 0/0")
-                                return self.goalChase(objects, initState, enemy_obj)
-                    for enemy_obj in enemy_objects:
-                        if ("enemy_past", enemy_obj) in initState and (
-                            "fat_agent_gt3",
-                            enemy_obj,
-                        ) in initState:
-                            if not (("ally_chasing", enemy_obj) in initState):
-                                if self.debug:
-                                    print(f"Agent {self.index}: Pacman - priority 0/1")
-                                return self.goalChase(objects, initState, enemy_obj)
-                    for enemy_obj in enemy_objects:
-                        if ("enemy_past", enemy_obj) in initState and (
-                            "fat_agent",
-                            enemy_obj,
-                        ) in initState:
-                            if not (("ally_chasing", enemy_obj) in initState):
-                                if self.debug:
-                                    print(f"Agent {self.index}: Pacman - priority 0/2")
-                                return self.goalChase(objects, initState, enemy_obj)
-                    for enemy_obj in enemy_objects:
-                        if ("enemy_past", enemy_obj) in initState:
-                            if not (("ally_chasing", enemy_obj) in initState):
-                                if self.debug:
-                                    print(f"Agent {self.index}: Pacman - priority 0/3")
-                                return self.goalChase(objects, initState, enemy_obj)
-
-            # Priority 1: Eat capsule if we're closest
-            if ("closest_to_capsule",) in initState:
-                for enemy_obj in enemy_objects:
-                    if not (("is_scared", enemy_obj) in initState):
-                        if self.debug:
-                            print(f"Agent {self.index}: Pacman - priority 1")
-                        return self.goalEatCapsule(objects, initState)
-
-            # Priority 2: Don't have enough food to take lead - keep eating
-            if not (("fat_agent", myObj) in initState):
-                if self.debug:
-                    print(f"Agent {self.index}: Pacman - priority 2")
-                return self.goalEatFood(objects, initState)
-
-            # Priority 3: Have enough food to take lead and there is no food nearby - escape
-            if ("fat_agent_gt10", myObj) in initState or not (
-                "near_food",
-                myObj,
-            ) in initState:
-                if self.debug:
-                    print(f"Agent {self.index}: Pacman - priority 3")
-                return self.goalEscape(objects, initState)
-
-            # Priority 4: Not under threat and timer high - keep eating
-            if not ("enemy_close_distance",) in initState:
-                if self.debug:
-                    print(f"Agent {self.index}: Pacman - priority 4")
-                return self.goalEatFood(objects, initState)
-
-            # Priority 5: Have enough for lead - escape
-            if self.debug:
-                print(f"Agent {self.index}: Pacman - priority 5")
-            return self.goalEscape(objects, initState)
-
-        # ==================== GHOST LOGIC ====================
-
-        # Priority 1: If scared, attack
-        if is_scared:
-            if self.debug:
-                print(f"Agent {self.index}: Ghost - priority 1")
-            return self.goalEatFood(objects, initState)
-
-        # Get enemy objects for chase goals
-        enemy_objects = [obj[0] for obj in objects if obj[1] in ["enemy1", "enemy2"]]
-
-        # Priority 2: Chase fat enemies in priority of fatness (only if we're closer)
-        for enemy_obj in enemy_objects:
-            if ("fat_agent_gt10", enemy_obj) in initState:
-                if (
-                    not (("ally_chasing", enemy_obj) in initState)
-                    and ("closer_to_enemy", enemy_obj) in initState
-                ):
-                    if self.debug:
-                        print(f"Agent {self.index}: Ghost - priority 2/0")
-                    return self.goalChase(objects, initState, enemy_obj)
-            if ("fat_agent_gt3", enemy_obj) in initState:
-                if (
-                    not (("ally_chasing", enemy_obj) in initState)
-                    and ("closer_to_enemy", enemy_obj) in initState
-                ):
-                    if self.debug:
-                        print(f"Agent {self.index}: Ghost - priority 2/1")
-                    return self.goalChase(objects, initState, enemy_obj)
-            if ("fat_agent", enemy_obj) in initState:
-                if (
-                    not (("ally_chasing", enemy_obj) in initState)
-                    and ("closer_to_enemy", enemy_obj) in initState
-                ):
-                    if self.debug:
-                        print(f"Agent {self.index}: Ghost - priority 2/2")
-                    return self.goalChase(objects, initState, enemy_obj)
-            if ("is_pacman", enemy_obj) in initState:
-                if (
-                    not (("ally_chasing", enemy_obj) in initState)
-                    and ("closer_to_enemy", enemy_obj) in initState
-                ):
-                    if self.debug:
-                        print(f"Agent {self.index}: Ghost - priority 2/3")
-                    return self.goalChase(objects, initState, enemy_obj)
-
-        # Priority 3: Winning by >3, defend
-        if ("winning_gt3",) in initState:
-            if self.debug:
-                print(f"Agent {self.index}: Ghost - priority 3")
-            return self.goalDefaultDefend(objects, initState)
-
-        # Priority 4: Teammate is chasing, we should attack
-        # Check if ally is chasing any enemy
-        ally_is_chasing = any(
-            ("ally_chasing", eobj) in initState for eobj in enemy_objects
-        )
-        if ally_is_chasing:
-            if self.debug:
-                print(f"Agent {self.index}: Ghost - priority 4")
-            return self.goalEatFood(objects, initState)
-
-        # Priority 5: Losing by >3, attack
-        if ("losing_gt3",) in initState:
-            if self.debug:
-                print(f"Agent {self.index}: Ghost - priority 5")
-            return self.goalEatFood(objects, initState)
-
-        # Priority 6: If noone is defending, then we defend
-        if (
-            ("ally_defending",) not in initState
-            and (
-                (
-                    "is_pacman",
-                    teammateObj,
-                )
-                not in initState
-                and ("closer_to_closest_enemy",) in initState
-            )
-            or ("is_pacman", teammateObj) in initState
-        ):
-            if self.debug:
-                print(f"Agent {self.index}: Ghost - priority 6")
-            return self.goalDefaultDefend(objects, initState)
-
-        # Priority 7: If we already have a lead, defend
-        if ("winning_gt3",) in initState:
-            if self.debug:
-                print(f"Agent {self.index}: Ghost - priority 7")
-            return self.goalDefaultDefend(objects, initState)
-
-        # Priority 5: Not winning, attack
-        # if ("winning",) not in initState:
-        #     if ("is_pacman", teammateObj) not in initState and (
-        #         "closer_to_closest_enemy",
-        #     ) not in initState:
-        #         if self.debug:
-        #             print(f"Agent {self.index}: Ghost - priority 5")
-        #         return self.goalEatFood(objects, initState)
-
-        # Priority 8: Default - attack
-        if self.debug:
-            print(f"Agent {self.index}: Ghost - priority 8")
-        return self.goalEatFood(objects, initState)
-
-    def goalEatCapsule(self, objects: List[Tuple], initState: List[Tuple]):
-        positiveGoals = []
-        for obj in objects:
-            if obj[1] in ["enemy1", "enemy2"]:
-                positiveGoals.append(("is_scared", obj[0]))
-
-        return positiveGoals, []
-
-    def goalEatFood(self, objects: List[Tuple], initState: List[Tuple]):
-        myObj = f"a{self.index}"
-        return [
-            ("fat_agent", myObj),
-            ("fat_agent_gt3", myObj),
-            ("fat_agent_gt10", myObj),
-        ], []
-
-    def goalEscape(self, objects: List[Tuple], initState: List[Tuple]):
-        myObj = f"a{self.index}"
-        return [], [("is_pacman", myObj)]
-
-    def goalChase(self, objects: List[Tuple], initState: List[Tuple], enemy_obj):
-        return [], [("is_pacman", enemy_obj)]
-
-    def goalDefaultDefend(self, objects: List[Tuple], initState: List[Tuple]):
-        return [("defend_foods",)], []
+        pass
 
     def posSatisfyLowLevelPlan(self, gameState: GameState):
         if (
@@ -910,1006 +430,80 @@ class MixedAgent(CaptureAgent):
             return False
         return True
 
-
-    def isJunctionSafe(self, junction_pos: Tuple[int, int], my_pos: Tuple[int, int], gameState: GameState, enemyVirtualStates: Dict[int, AgentState]) -> bool:
-        """
-        Check if a junction is safe to visit.
-
-        A junction is safe if:
-        1. We can reach it before any non-scared ghost
-        2. If it's in a dead-end zone, we can reach the exit before enemies
-        """
-        topology = MixedAgent.MAP_TOPOLOGY
-
-        my_dist = self.getMazeDistance(my_pos, junction_pos)
-
-        # Check all non-scared enemy ghosts
-        for enemy_idx, enemy_state in enemyVirtualStates.items():
-            if not enemy_state.isPacman and enemy_state.scaredTimer <= LOW_SCARED_TIMER:
-                enemy_pos = enemy_state.getPosition()
-                if not enemy_pos:
-                    continue
-
-                enemy_dist = self.getMazeDistance(enemy_pos, junction_pos)
-
-                # If in a dead-end zone, check if we can escape
-                if junction_pos in topology.dead_end_zones:
-                    exit_pos = topology.dead_end_zones[junction_pos]
-
-                    # Total distance: to junction + from junction to exit
-                    my_total_dist = my_dist + self.getMazeDistance(junction_pos, exit_pos)
-                    enemy_dist_to_exit = self.getMazeDistance(enemy_pos, exit_pos)
-
-                    # Enemy can block exit? Not safe
-                    if enemy_dist_to_exit <= my_total_dist + 2:
-                        return False
-
-                # Enemy is much closer to junction? Not safe
-                elif enemy_dist < my_dist - 2:
-                    return False
-
-        return True
-
-    def selectBestJunctionForFood(self, gameState: GameState, enemyVirtualStates: Dict[int, AgentState]) -> Tuple[int, int]:
-        """
-        Select the best adjacent junction to move toward for collecting food.
-
-        Returns the junction position, or None if no good option.
-        """
-        topology = MixedAgent.MAP_TOPOLOGY
-        my_pos = gameState.getAgentPosition(self.index)
-        foods = self.getFood(gameState).asList()
-
-        if not foods:
-            return None
-
-        # Find which junction we're at or near
-        current_junction = None
-        if my_pos in topology.junctions:
-            current_junction = my_pos
-        elif my_pos in topology.tile_to_corridor:
-            # In a corridor - find nearest endpoint
-            corridor_id = topology.tile_to_corridor[my_pos]
-            corridor = topology.corridors[corridor_id]
-            dist_a = self.getMazeDistance(my_pos, corridor.junction_a)
-            dist_b = self.getMazeDistance(my_pos, corridor.junction_b)
-            current_junction = corridor.junction_a if dist_a <= dist_b else corridor.junction_b
-
-        if not current_junction:
-            # Fallback: find nearest junction
-            current_junction = min(topology.junctions.keys(),
-                                 key=lambda j: self.getMazeDistance(my_pos, j))
-
-        # Get adjacent junctions (neighbors in the junction graph)
-        current_junction_obj = topology.junctions[current_junction]
-        adjacent_junctions = list(current_junction_obj.connected_junctions.keys())
-
-        # Also consider staying at current junction if there's food nearby
-        adjacent_junctions.append(current_junction)
-
-        # Score each adjacent junction
-        best_junction = None
-        best_score = float('inf')
-
-        for junction_pos in adjacent_junctions:
-            # Skip if not safe
-            if not self.isJunctionSafe(junction_pos, my_pos, gameState, enemyVirtualStates):
-                continue
-
-            # Find closest food to this junction
-            min_food_dist = min([self.getMazeDistance(junction_pos, f) for f in foods])
-
-            # Distance from current position to this junction
-            my_dist_to_junction = self.getMazeDistance(my_pos, junction_pos)
-
-            # Score: prioritize junctions close to food and close to us
-            score = min_food_dist * 3 + my_dist_to_junction
-
-            if score < best_score:
-                best_score = score
-                best_junction = junction_pos
-
-        return best_junction
-
-    def aStarSearch(self, start: Tuple[int, int], goal: Tuple[int, int], gameState: GameState) -> List[Tuple[int, int]]:
-        """A* search from start to goal."""
-        from util import PriorityQueue
-
-        walls = gameState.getWalls()
-        frontier = PriorityQueue()
-        frontier.push((start, [start]), 0)
-        explored = set()
-
-        while not frontier.isEmpty():
-            current_pos, path = frontier.pop()
-
-            if current_pos == goal:
-                return path
-
-            if current_pos in explored:
-                continue
-
-            explored.add(current_pos)
-
-            for next_pos in Actions.getLegalNeighbors(current_pos, walls):
-                if next_pos not in explored:
-                    new_path = path + [next_pos]
-                    g_cost = len(new_path) - 1
-                    h_cost = self.getMazeDistance(next_pos, goal)
-                    frontier.push((next_pos, new_path), g_cost + h_cost)
-
-        return []
-
-    def getLowLevelPlanHS(self, gameState: GameState, highLevelAction: str) -> List[Tuple[str,Tuple]]:
-        walls = gameState.getWalls()
-
-        if highLevelAction == "eat_food":
-            # Get enemy states for safety checking
-            stateInfo = self.getStateInfo(gameState)
-            enemyVirtualStates = stateInfo.enemyVirtualStates
-
-            my_pos = gameState.getAgentPosition(self.index)
-
-            # Select best junction to move toward
-            target_junction = self.selectBestJunctionForFood(gameState, enemyVirtualStates)
-
-            if not target_junction:
-                if self.debug:
-                    print(f"Agent {self.index}: No safe junction found for eat_food")
-                return []
-
-            # Use A* to find path to target junction
-            path = self.aStarSearch(my_pos, target_junction, gameState)
-
-            if not path or len(path) <= 1:
-                return []
-
-            # Convert path to (action, position) tuples
-            plan = []
-            for i in range(len(path) - 1):
-                current = path[i]
-                next_pos = path[i + 1]
-
-                dx = next_pos[0] - current[0]
-                dy = next_pos[1] - current[1]
-
-                if dx == 1:
-                    action = Directions.EAST
-                elif dx == -1:
-                    action = Directions.WEST
-                elif dy == 1:
-                    action = Directions.NORTH
-                elif dy == -1:
-                    action = Directions.SOUTH
-                else:
-                    action = Directions.STOP
-
-                plan.append((action, next_pos))
-
-            if self.debug:
-                print(f"Agent {self.index}: Moving to junction {target_junction}, path length={len(plan)}")
-
-            return plan
-
-        return []
-
-    # ------------------------------- Q-learning low level plan Functions -------------------------------
-
-    """
-    Iterate through all q-values that we get from all
-    possible actions, and return the action associated
-    with the highest q-value.
-    """
-
-    @profile
-    def getLowLevelPlanQL(
+    def getLowLevelPlanHS(
         self, gameState: GameState, highLevelAction: str
     ) -> List[Tuple[str, Tuple]]:
-        values = []
-        legalActions = gameState.getLegalActions(self.index)
-        rewardFunction = None
-        featureFunction = None
-        weights = None
-        learningRate = 0
-
-        ##########
-        # Classify high level actions into offensive, retreat, or defensive categories
-        ##########
-        # Offensive actions: attack, aggressive_attack, desperate_attack
-        if highLevelAction == "eat_food":
-            # Escape actions - complete reward function implemented
-            featureFunction = self.getEatFoodFeatures
-            weights = MixedAgent.QLWeights["eatFoodWeights"]
-        elif highLevelAction == "eat_capsule":
-            # Escape actions - complete reward function implemented
-            featureFunction = self.getEatCapsuleFeatures
-            weights = MixedAgent.QLWeights["eatCapsuleWeights"]
-        elif highLevelAction == "escape":
-            # Escape actions - complete reward function implemented
-            featureFunction = self.getEscapeFeatures
-            weights = MixedAgent.QLWeights["escapeWeights"]
-        elif highLevelAction == "chase_enemy":
-            # Escape actions - complete reward function implemented
-            featureFunction = self.getChaseFeatures
-            weights = MixedAgent.QLWeights["chaseWeights"]
-        elif highLevelAction == "default_defend":
-            # Escape actions - complete reward function implemented
-            featureFunction = self.getDefaultDefendFeatures
-            weights = MixedAgent.QLWeights["defaultDefendWeights"]
-        else:
-            # Defensive actions - complete reward function implemented - default weights
-            featureFunction = self.getDefaultDefendFeatures
-            weights = MixedAgent.QLWeights["defaultDefendWeights"]
-
-        stateInfo = self.getStateInfo(gameState)
-
-        if len(legalActions) != 0:
-            for action in legalActions:
-                nextStateInfo = self.getStateInfo(self.getSuccessor(gameState, action))
-                features = featureFunction(stateInfo, nextStateInfo, action)
-                qval = self.getQValue(features, weights)
-                values.append((qval, action, features))
-
-            # Debug: print Q-values and feature breakdown for all actions
-            if len(values) > 0 and self.debug:
-                print(f"\nAgent {self.index} ({highLevelAction}) - Q-values:")
-                for qval, act, feats in values:
-                    # Show only non-zero features
-                    feat_breakdown = {
-                        k: (
-                            round(feats[k], 3),
-                            round(weights[k], 2),
-                            round(feats[k] * weights[k], 2),
-                        )
-                        for k in feats
-                        if feats[k] != 0
-                    }
-                    print(
-                        f"  {act}: Q={round(qval, 2)} | Features (val, weight, contribution): {feat_breakdown}"
-                    )
-
-            action = max(values, key=lambda x: x[0])[1]
-            if self.debug:
-                print(f"Agent {self.index}: Best action: {action}")
-        myPos = gameState.getAgentPosition(self.index)
-        nextPos = Actions.getSuccessor(myPos, action)
-        return [(action, nextPos)]
-
-    """
-    Iterate through all features (closest food, bias, ghost dist),
-    multiply each of the features' value to the feature's weight,
-    and return the sum of all these values to get the q-value.
-    """
-
-    def getQValue(self, features, weights):
-        return features * weights
-
-    """
-    Iterate through all features and for each feature, update
-    its weight values using the following formula:
-    w(i) = w(i) + alpha((reward + discount*value(nextState)) - Q(s,a)) * f(i)(s,a)
-    """
-
-    # ------------------------------- Feature Related Action Functions -------------------------------
-
-    def getStateInfo(self, gameState: GameState):
-        enemyVirtualStates = {}
-        myPos = gameState.getAgentPosition(self.index)
-
-        for enemy_idx in self.getOpponents(gameState):
-            # Get the real enemy state from gameState (has correct scaredTimer, isPacman, etc.)
-            real_enemy_state = gameState.getAgentState(enemy_idx)
-            enemy_state = real_enemy_state.copy()
-
-            # Determine the position to use
-            estimated_pos = MixedAgent.ESTIMATED_POSITIONS.get(enemy_idx)
-            real_pos = real_enemy_state.getPosition()
-            enemy_start_pos = gameState.getInitialAgentPosition(enemy_idx)
-
-            # Check if enemy was just eaten:
-            # - Estimated position was close to us (within CLOSE_DISTANCE)
-            # - Real position is now None (can't see them anymore)
-            # This likely means they got eaten and respawned at start position
-            if (
-                estimated_pos is not None
-                and (real_pos is None or real_pos == enemy_start_pos)
-                and self.getMazeDistance(myPos, estimated_pos) <= BREATHING_DISTANCE
-            ):
-                # Enemy likely got eaten, use their start position
-                position_to_use = enemy_start_pos
+        pos = gameState.getAgentPosition(self.index)
+        # Find an attack if possible
+        if highLevelAction == "default-attack":
+            heuristic = offensive_heuristic
+            goals = []
+            # If we are at a critical capsule junction, try to get capsule
+            if pos in self.getCapsuleJunctions():
+                goals = self.getCapsules()
+            # If we are at a capsule corridor, try to get capsule
+            elif MixedAgent.MAP_TOPOLOGY.tile_to_corridor.get(pos) in self.getCapsuleCorridors():
+                goals = self.getCapsules()
+            # If we are already at a critical food junction, try to get food
+            elif pos in self.getFoodJunctions():
+                goals = self.getFood()
+            # If we are at a food corridor, try to get food
+            elif MixedAgent.MAP_TOPOLOGY.tile_to_corridor.get(pos) in self.getFoodCorridors():
+                goals = self.getFood()
+            # Try to get to one of the food junctions
             else:
-                # Use estimated position as normal
-                position_to_use = estimated_pos
+                goals = list(self.getFoodJunctions().keys())
 
-            # Only override the position with our chosen position, keep everything else (scaredTimer, etc.) from real state
-            enemy_state.configuration = Configuration(
-                position_to_use,
-                real_enemy_state.configuration.direction
-                if real_enemy_state.configuration
-                else -1,
-            )
-            enemyVirtualStates[enemy_idx] = enemy_state
+            # TODO: I think we need this to return if this is a clear/conflicting path
+            # If it's clear, we can just return the full path
+            # If we're going to die, we need to reevaluate the goal
+            path = get_path(pos, goals, self, gameState, heuristic)
 
-        return StateInfo(
-            gameState,
-            gameState.getAgentState(self.index),
-            gameState.getAgentState((self.index + 2) % 4),
-            enemyVirtualStates,
-        )
+        elif highLevelAction == "escape":
+            heuristic = offensive_heuristic
+            goals = self.getEscapePoints()
+            # TODO: same thing here
+            path = get_path(pos, goals, self, gameState, heuristic)
+
+        elif highLevelAction == "defend":
+            best_action, best_next_pos, max_advantage = Directions.STOP, pos, 0.0
+
+            legalActions = gameState.getLegalActions(self.index)
+            for action in legalActions:
+                successor = self.getSuccessor(gameState, action)
+                advantages = self.calculate_advantages(gameState)
+                total_advantage = 0.0
+
+                for food in self.getFoodYouAreDefending():
+                    total_advantage += advantages[food][-1]
+
+                if total_advantage > max_advantage:
+                    best_action = action
+                    best_next_pos = successor.getAgentPosition(self.index)
+                    best_action = action
+
+            return [(best_action, best_next_pos)]
+
+        elif highLevelAction == "prevent-escape":
+            best_action, best_next_pos, max_advantage = Directions.STOP, pos, 0.0
+
+            legalActions = gameState.getLegalActions(self.index)
+            for action in legalActions:
+                successor = self.getSuccessor(gameState, action)
+                advantages = self.calculate_advantages(gameState)
+                total_advantage = 0.0
+
+                for escape in self.getEscapePointsYouAreDefending():
+                    total_advantage += advantages[escape][-1]
+
+                if total_advantage > max_advantage:
+                    best_action = action
+                    best_next_pos = successor.getAgentPosition(self.index)
+                    best_action = action
+
+            return [(best_action, best_next_pos)]
 
     # ==================== Shared Helper Functions ====================
-
-    def getConsecutiveStopReversePenalty(self):
-        count = MixedAgent.CONSECUTIVE_STOP_REVERSE.get(self.index, 0)
-        return 2**count
-
-    def getDeathDistanceGhosts(self, myPos, enemyVirtualStates: Dict[int, AgentState]):
-        count = 0
-        for enemy_idx, enemy_state in enemyVirtualStates.items():
-            if not enemy_state.isPacman and enemy_state.scaredTimer == 0:
-                enemy_pos = enemy_state.getPosition()
-                if enemy_pos:
-                    dist = self.getMazeDistance(myPos, enemy_pos)
-                    if dist <= DEATH_DISTANCE:
-                        count += 1
-        return count
-
-    def getDeathDistancePacman(
-        self, myState, enemyVirtualStates: Dict[int, AgentState]
-    ):
-        count = 0
-        myPos = myState.getPosition()
-        is_scared = myState.scaredTimer > 0
-        if is_scared:
-            for enemy_idx, enemy_state in enemyVirtualStates.items():
-                if enemy_state.isPacman:
-                    enemy_pos = enemy_state.getPosition()
-                    dist = self.getMazeDistance(myPos, enemy_pos)
-                    if dist <= DEATH_DISTANCE:
-                        count += 1
-        return count
-
-    def getBreathingDistanceGhosts(
-        self, myPos, enemyVirtualStates: Dict[int, AgentState]
-    ):
-        """Count non-scared ghosts within breathing distance (2 steps)"""
-        count = 0
-        for enemy_idx, enemy_state in enemyVirtualStates.items():
-            if not enemy_state.isPacman and enemy_state.scaredTimer == 0:
-                enemy_pos = enemy_state.getPosition()
-                if enemy_pos:
-                    dist = self.getMazeDistance(myPos, enemy_pos)
-                    if dist <= BREATHING_DISTANCE:
-                        count += 1
-        return count
-
-    def getCloseDistanceGhosts(self, myPos, enemyVirtualStates: Dict[int, AgentState]):
-        """Count non-scared ghosts within close distance (4 steps)"""
-        count = 0
-        for _, enemy_state in enemyVirtualStates.items():
-            if not enemy_state.isPacman and enemy_state.scaredTimer == 0:
-                enemy_pos = enemy_state.getPosition()
-                if enemy_pos:
-                    dist = self.getMazeDistance(myPos, enemy_pos)
-                    if dist <= CLOSE_DISTANCE:
-                        count += 1
-        return count
-
-    def getGotEaten(self, agentState: AgentState, enemyVirtualStates):
-        """
-        Check if agent got eaten (sent back to start position).
-        Returns 1.0 if eaten, 0.0 otherwise.
-        """
-        nextPos = agentState.getPosition()
-        if nextPos == self.startPosition:
-            return 1.0
-
-        # Check if we're within DEATH_DISTANCE of any enemy ghost
-        if agentState.isPacman:
-            count = self.getDeathDistanceGhosts(nextPos, enemyVirtualStates)
-            if count > 0:
-                return 1.0
-
-        # Check if we're within DEATH_DISTANCE of any enemy Pacman
-        if not agentState.isPacman:
-            count = self.getDeathDistancePacman(agentState, enemyVirtualStates)
-            if count > 0:
-                return 1.0
-
-        return 0.0
-
-    def getDistanceToHome(self, pos, gameState: GameState):
-        """Get maze distance to home territory border"""
-        if self.isInHome(pos, gameState):
-            return 0
-
-        # Get x-coordinate of the border
-        walls = gameState.getWalls()
-        width = walls.width
-        if self.red:
-            border_x = width // 2 - 1
-        else:
-            border_x = width // 2
-
-        # Find closest border position
-        height = walls.height
-        min_dist = float("inf")
-        for y in range(height):
-            if not walls[border_x][y]:
-                dist = self.getMazeDistance(pos, (border_x, y))
-                if dist < min_dist:
-                    min_dist = dist
-        return min_dist if min_dist != float("inf") else 0
-
-    def getDistanceToEnemyTerritory(self, pos, gameState: GameState):
-        """Get maze distance to enemy territory border"""
-        if self.isInEnemyTerritory(pos, gameState):
-            return 0
-
-        walls = gameState.getWalls()
-        width = walls.width
-        if self.red:
-            border_x = width // 2  # Red wants to go to blue side
-        else:
-            border_x = width // 2 - 1  # Blue wants to go to red side
-
-        # Find closest border position
-        height = walls.height
-        min_dist = float("inf")
-        for y in range(height):
-            if not walls[border_x][y]:
-                dist = self.getMazeDistance(pos, (border_x, y))
-                if dist < min_dist:
-                    min_dist = dist
-        return min_dist if min_dist != float("inf") else 0
-
-    def isInEnemyTerritory(self, pos, gameState: GameState):
-        """Check if position is in enemy territory"""
-        walls = gameState.getWalls()
-        width = walls.width
-        x = int(pos[0])
-        if self.red:
-            return x >= width // 2
-        else:
-            return x < width // 2
-
-    def wentHome(self, stateInfo: StateInfo):
-        """Check if position is in home territory"""
-        agentState = stateInfo.agentState
-        pos = agentState.getPosition()
-        isHome = not self.isInEnemyTerritory(pos, stateInfo.gameState)
-        return isHome and pos != self.startPosition
-
-    def isInHome(self, pos, gameState: GameState):
-        """Check if position is in home territory"""
-        return not self.isInEnemyTerritory(pos, gameState)
-
-    def createDefensiveDistancer(self, gameState: GameState):
-        """
-        Create a distance calculator that treats enemy territory as walls.
-        This is used for defensive positioning to avoid local minima at the border.
-        """
-        walls = gameState.getWalls().copy()
-        width = walls.width
-        height = walls.height
-
-        # Mark enemy territory as walls
-        for x in range(width):
-            for y in range(height):
-                if not walls[x][y]:  # If not already a wall
-                    if self.isInEnemyTerritory((x, y), gameState):
-                        walls[x][y] = True
-
-        # Create a new distancer with the modified walls
-        return distanceCalculator.Distancer(gameState.data.layout, walls)
-
-    def getDefensiveMazeDistance(self, pos1, pos2, gameState: GameState):
-        """
-        Get maze distance using the defensive distancer (enemy territory as walls).
-        Returns distance to border position aligned with target if target is in enemy territory.
-        """
-        # If target is in enemy territory, calculate distance to aligned border position instead
-        if self.isInEnemyTerritory(pos2, gameState):
-            pos2 = self.getBorderPositionAlignedWith(pos2)
-
-        return self.defensiveDistancer.getDistance(pos1, pos2)
-
-    def getDistanceToNearestFood(self, pos, gameState: GameState):
-        """Get distance to nearest food pellet on enemy side"""
-        food = self.getFood(gameState).asList()
-        if len(food) == 0:
-            return 0
-        return min([self.getMazeDistance(pos, f) for f in food])
-
-    def getDistanceToNearestCapsule(self, pos, gameState: GameState):
-        """Get distance to nearest capsule on enemy side"""
-        capsules = self.getCapsules(gameState)
-        if len(capsules) == 0:
-            return 0
-        return min([self.getMazeDistance(pos, c) for c in capsules])
-
-    def getDistanceToTeammate(self, myPos, teammateState: AgentState):
-        """Get distance to teammate"""
-        teammate_pos = teammateState.getPosition()
-        assert teammate_pos
-        return self.getMazeDistance(myPos, teammate_pos)
-
-    def getDistanceToAttackingTeammate(self, myPos, teammateState: AgentState):
-        """Get distance to teammate"""
-        teammate_pos = teammateState.getPosition()
-        assert teammate_pos
-        if teammateState.isPacman:
-            return self.getMazeDistance(myPos, teammate_pos)
-        return 0
-
-    def getDistanceToNearestEnemy(
-        self,
-        myPos,
-        enemyVirtualStates: Dict[int, AgentState],
-        gameState=None,
-        defendMode=False,
-    ):
-        """
-        Get distance to nearest enemy (any type)
-
-        Args:
-            myPos: Current position
-            enemyVirtualStates: Dict of enemy states
-            defendMode: If True, use defensive distancer (enemy territory as walls) for optimal border positioning
-        """
-        min_dist = float("inf")
-        def_dist = float("inf")
-        teammate_assignment = MixedAgent.DEFENSIVE_ASSIGNMENTS[(self.index + 2) % 4]
-        for enemy_idx, enemy_state in enemyVirtualStates.items():
-            if defendMode and (teammate_assignment == enemy_idx):
-                continue
-            enemy_pos = enemy_state.getPosition()
-            assert enemy_pos
-            dist = self.getMazeDistance(myPos, enemy_pos)
-            if dist < min_dist:
-                min_dist = dist
-                if defendMode:
-                    MixedAgent.DEFENSIVE_ASSIGNMENTS[self.index] = enemy_idx
-                    assert gameState
-                    # For defense: use defensive distancer to avoid local minima at border
-                    def_dist = self.getDefensiveMazeDistance(
-                        myPos, enemy_pos, gameState
-                    )
-        if defendMode:
-            return def_dist
-        return min_dist
-
-    def getBorderPositionAlignedWith(self, enemy_pos):
-        """
-        Get the border position at the same y-coordinate as the enemy.
-        This is used for defensive positioning to align with enemy threats.
-        """
-        walls = self.getCurrentObservation().getWalls()
-        width = walls.width
-
-        # Get the x-coordinate of the border (our side)
-        if self.red:
-            border_x = width // 2 - 1
-        else:
-            border_x = width // 2
-
-        enemy_y = int(enemy_pos[1])
-
-        # Find the closest non-wall position at the border near enemy's y
-        # Check enemy_y first, then spiral outward
-        for y_offset in range(walls.height):
-            for dy in [0] if y_offset == 0 else [-y_offset, y_offset]:
-                check_y = enemy_y + dy
-                if 0 <= check_y < walls.height and not walls[border_x][check_y]:
-                    return (border_x, check_y)
-
-        # Fallback: return middle of border if all else fails
-        return (border_x, walls.height // 2)
-
-    def getDistanceToEnemy(
-        self, myPos, enemyVirtualStates: Dict[int, AgentState], target_enemy_idx
-    ):
-        """Get distance to a specific target enemy"""
-        assert target_enemy_idx in enemyVirtualStates
-        enemy_pos = enemyVirtualStates[target_enemy_idx].getPosition()
-        assert enemy_pos
-
-        return self.getMazeDistance(myPos, enemy_pos)
-
-    def isBetweenEnemyAndEscape(
-        self, myPos, target_enemy_state: AgentState, gameState: GameState
-    ):
-        """
-        Check if we're between enemy and their escape route (home).
-        Only relevant when enemy is a Pacman invading our territory.
-        """
-        # Only intercept if enemy is a Pacman (invading)
-        if not target_enemy_state.isPacman:
-            return 0.0
-
-        target_enemy_pos = target_enemy_state.getPosition()
-        assert target_enemy_pos
-
-        width = gameState.getWalls().width
-        my_x = int(myPos[0])
-        enemy_x = int(target_enemy_pos[0])
-
-        # Enemy is Pacman invading us, we want to block their escape to their home
-        if self.red:
-            border_x = width // 2
-            return 1.0 if enemy_x <= my_x <= border_x else 0.0
-        else:
-            border_x = width // 2 - 1
-            return 1.0 if border_x <= my_x <= enemy_x else 0.0
-
-    # ==================== Feature Functions ====================
-
-    def getAttackFeatures(self, stateInfo: StateInfo, nextStateInfo: StateInfo, action):
-        """
-        Features for crossing into enemy territory.
-        Priority: avoid ghosts > get to enemy territory > spread out from teammate
-        """
-        features = util.Counter()
-        myPos = stateInfo.agentState.getPosition()
-        nextPos = nextStateInfo.agentState.getPosition()
-
-        # Priority 1: Avoid breathing distance ghosts (most critical)
-        features["breathing-distance-ghosts"] = self.getBreathingDistanceGhosts(
-            nextPos, nextStateInfo.enemyVirtualStates
-        )
-
-        features["close-distance-ghosts"] = self.getCloseDistanceGhosts(
-            nextPos, nextStateInfo.enemyVirtualStates
-        )
-
-        # Priority 2: Reward being in enemy territory
-        features["in-enemy-territory"] = (
-            1.0 if self.isInEnemyTerritory(nextPos, nextStateInfo.gameState) else 0.0
-        )
-
-        # Priority 3: Get closer to enemy territory
-        features["distance-to-enemy-territory"] = self.getDistanceToEnemyTerritory(
-            nextPos, nextStateInfo.gameState
-        )
-
-        # Priority 4: Spread out from teammate
-        features["distance-to-teammate"] = self.getDistanceToTeammate(
-            nextPos, nextStateInfo.teammateState
-        )
-
-        # Penalty: Getting eaten
-        features["got-eaten"] = self.getGotEaten(
-            nextStateInfo.agentState, nextStateInfo.enemyVirtualStates
-        )
-
-        exponential_penalty = self.getConsecutiveStopReversePenalty()
-        features["stop-reverse"] = (
-            exponential_penalty
-            if action == Directions.STOP
-            or action
-            == Directions.REVERSE[stateInfo.agentState.configuration.direction]
-            else 0.0
-        )
-
-        return features
-
-    def getEatFoodFeatures(
-        self, stateInfo: StateInfo, nextStateInfo: StateInfo, action
-    ):
-        """
-        Features for eating food in enemy territory.
-        Priority: avoid ghosts > eat food > get to food > avoid close ghosts
-        """
-        features = util.Counter()
-        nextPos = nextStateInfo.agentState.getPosition()
-
-        # Priority 1: Avoid breathing distance ghosts
-        features["breathing-distance-ghosts"] = self.getBreathingDistanceGhosts(
-            nextPos, nextStateInfo.enemyVirtualStates
-        )
-
-        # Priority 0: Must be in enemy territory
-        # features["in-enemy-territory"] = (
-        #     1.0 if self.isInEnemyTerritory(nextPos, nextStateInfo.gameState) else 0.0
-        # )
-
-        # Priority 2: Reward eating food
-        currentCarrying = stateInfo.agentState.numCarrying
-        nextCarrying = nextStateInfo.agentState.numCarrying
-        features["ate-food"] = 1.0 if nextCarrying > currentCarrying else 0.0
-
-        # Priority 3: Get closer to food
-        features["distance-to-nearest-food"] = self.getDistanceToNearestFood(
-            nextPos, nextStateInfo.gameState
-        )
-
-        # Priority 4: Avoid close distance ghosts
-        features["close-distance-ghosts"] = self.getCloseDistanceGhosts(
-            nextPos, nextStateInfo.enemyVirtualStates
-        )
-
-        # Priority 5: Avoid close to attacking teammate
-        features[
-            "distance-to-attacking-teammate"
-        ] = self.getDistanceToAttackingTeammate(nextPos, nextStateInfo.teammateState)
-
-        # Penalty: Getting eaten
-        features["got-eaten"] = self.getGotEaten(
-            nextStateInfo.agentState, nextStateInfo.enemyVirtualStates
-        )
-
-        exponential_penalty = self.getConsecutiveStopReversePenalty()
-        features["stop-reverse"] = (
-            exponential_penalty
-            if action == Directions.STOP
-            or action
-            == Directions.REVERSE[stateInfo.agentState.configuration.direction]
-            else 0.0
-        )
-
-        return features
-
-    def getEatCapsuleFeatures(
-        self, stateInfo: StateInfo, nextStateInfo: StateInfo, action
-    ):
-        """
-        Features for eating capsules.
-        Priority: avoid ghosts > eat capsule > get to capsule > avoid close ghosts
-        """
-        features = util.Counter()
-        nextPos = nextStateInfo.agentState.getPosition()
-
-        # Priority 1: Avoid breathing distance ghosts
-        features["breathing-distance-ghosts"] = self.getBreathingDistanceGhosts(
-            nextPos, nextStateInfo.enemyVirtualStates
-        )
-
-        # Priority 0: Must be in enemy territory
-        # features["in-enemy-territory"] = (
-        #     1.0 if self.isInEnemyTerritory(nextPos, nextStateInfo.gameState) else 0.0
-        # )
-
-        # Priority 2: Reward eating capsule
-        currentCapsules = self.getCapsules(stateInfo.gameState)
-        nextCapsules = self.getCapsules(nextStateInfo.gameState)
-        features["ate-capsule"] = (
-            1.0 if len(nextCapsules) < len(currentCapsules) else 0.0
-        )
-
-        # Priority 3: Get closer to capsule
-        features["distance-to-nearest-capsule"] = self.getDistanceToNearestCapsule(
-            nextPos, nextStateInfo.gameState
-        )
-
-        # Priority 4: Avoid close distance ghosts
-        features["close-distance-ghosts"] = self.getCloseDistanceGhosts(
-            nextPos, nextStateInfo.enemyVirtualStates
-        )
-
-        # # Priority 5: Avoid close to attacking teammate
-        # features["distance-to-attacking-teammate"] = self.getDistanceToAttackingTeammate(
-        #     nextPos, nextStateInfo.teammateState
-        # )
-
-        # Penalty: Getting eaten
-        features["got-eaten"] = self.getGotEaten(
-            nextStateInfo.agentState, nextStateInfo.enemyVirtualStates
-        )
-
-        exponential_penalty = self.getConsecutiveStopReversePenalty()
-        features["stop-reverse"] = (
-            exponential_penalty
-            if action == Directions.STOP
-            or action
-            == Directions.REVERSE[stateInfo.agentState.configuration.direction]
-            else 0.0
-        )
-
-        return features
-
-    def getEscapeFeatures(self, stateInfo: StateInfo, nextStateInfo: StateInfo, action):
-        """
-        Features for escaping back home with food.
-        Priority: reach home > avoid breathing ghosts > get closer to home > avoid close ghosts
-        """
-        features = util.Counter()
-        myPos = stateInfo.agentState.getPosition()
-        nextPos = nextStateInfo.agentState.getPosition()
-
-        # Priority 1: Reward reaching home
-        features["in-home"] = 1.0 if self.wentHome(stateInfo) else 0.0
-
-        # Priority 2: Avoid breathing distance ghosts
-        features["breathing-distance-ghosts"] = self.getBreathingDistanceGhosts(
-            nextPos, nextStateInfo.enemyVirtualStates
-        )
-
-        # Priority 2: Get closer to home
-        features["distance-to-home"] = self.getDistanceToHome(
-            nextPos, nextStateInfo.gameState
-        )
-
-        # Priority 3: Avoid close distance ghosts
-        features["close-distance-ghosts"] = self.getCloseDistanceGhosts(
-            nextPos, nextStateInfo.enemyVirtualStates
-        )
-
-        # Penalty: Getting eaten
-        features["got-eaten"] = self.getGotEaten(
-            nextStateInfo.agentState, nextStateInfo.enemyVirtualStates
-        )
-
-        # Tie-breaking: Penalize stop and reverse
-        exponential_penalty = self.getConsecutiveStopReversePenalty()
-        features["stop-reverse"] = (
-            exponential_penalty
-            if action == Directions.STOP
-            or action
-            == Directions.REVERSE[stateInfo.agentState.configuration.direction]
-            else 0.0
-        )
-
-        return features
-
-    def getChaseFeatures(self, stateInfo: StateInfo, nextStateInfo: StateInfo, action):
-        """
-        Features for chasing a specific enemy.
-        Priority: stay home > get closer to enemy > intercept escape route > spread out from teammate
-        """
-        current_action = MixedAgent.CURRENT_ACTION.get(self.index)
-        assert hasattr(current_action, "name") and hasattr(current_action, "parameters")
-        assert (
-            current_action.name == "chase_enemy" and len(current_action.parameters) == 2
-        )
-
-        # Extract enemy index from parameter like "e1" or "e3"
-        enemy_obj = current_action.parameters[1]
-        enemy_index = int(enemy_obj[1:])  # "e1" -> 1, "e3" -> 3
-
-        assert (
-            enemy_index in nextStateInfo.enemyVirtualStates
-        ), f"{enemy_index} not in {nextStateInfo.enemyVirtualStates}"
-
-        features = util.Counter()
-        nextPos = nextStateInfo.agentState.getPosition()
-        target_enemy_state = nextStateInfo.enemyVirtualStates[enemy_index]
-
-        # Priority 1: Must stay in home territory
-        # features["in-home"] = (
-        #     1.0 if self.isInHome(nextPos, nextStateInfo.gameState) else 0.0
-        # )
-
-        features["ate_enemy"] = (
-            1.0
-            if target_enemy_state.getPosition()
-            == target_enemy_state.start.getPosition()
-            else 0.0
-        )
-
-        # Priority 2: Get closer to target enemy
-        features["distance-to-enemy"] = self.getDistanceToEnemy(
-            nextPos, nextStateInfo.enemyVirtualStates, enemy_index
-        )
-
-        # Priority 3: Position between enemy and their escape
-        features["between-enemy-and-escape"] = self.isBetweenEnemyAndEscape(
-            nextPos, target_enemy_state, nextStateInfo.gameState
-        )
-
-        # Priority 4: Spread out from teammate
-        features["distance-to-teammate"] = self.getDistanceToTeammate(
-            nextPos, nextStateInfo.teammateState
-        )
-
-        # Penalty: Getting eaten (shouldn't happen while defending, but just in case)
-        features["got-eaten"] = self.getGotEaten(
-            nextStateInfo.agentState, nextStateInfo.enemyVirtualStates
-        )
-
-        # Tie-breaking: Penalize stop and reverse
-        exponential_penalty = self.getConsecutiveStopReversePenalty()
-        features["stop-reverse"] = (
-            exponential_penalty
-            if action == Directions.STOP
-            or action
-            == Directions.REVERSE[stateInfo.agentState.configuration.direction]
-            else 0.0
-        )
-
-        return features
-
-    def getDefaultDefendFeatures(
-        self, stateInfo: StateInfo, nextStateInfo: StateInfo, action
-    ):
-        """
-        Features for default defensive behavior (patrolling).
-        Priority: stay home > position near potential threats > spread out from teammate
-        """
-        features = util.Counter()
-        nextPos = nextStateInfo.agentState.getPosition()
-
-        # Priority 1: Must stay in home territory
-        features["in-home"] = (
-            1.0 if self.isInHome(nextPos, nextStateInfo.gameState) else 0.0
-        )
-
-        # Priority 2: Position near enemies (using defensive distancer to avoid border local minima)
-        distance_to_nearest_enemy = self.getDistanceToNearestEnemy(
-            nextPos,
-            nextStateInfo.enemyVirtualStates,
-            nextStateInfo.gameState,
-            defendMode=True,
-        )
-        features["distance-to-nearest-enemy"] = distance_to_nearest_enemy
-
-        # Priority 3: Spread out from teammate
-        features["distance-to-teammate"] = self.getDistanceToTeammate(
-            nextPos, nextStateInfo.teammateState
-        )
-
-        # Check if we're both defending
-        # current_action = MixedAgent.CURRENT_ACTION.get((self.index + 2) % 4)
-        # if hasattr(current_action, "name") and current_action.name == "defend":
-        #     features[
-        #         "distance-to-teammate-both-defending"
-        #     ] = self.getDistanceToTeammate(nextPos, nextStateInfo.teammateState)
-
-        # Penalty: Getting eaten (shouldn't happen while defending, but just in case)
-        features["got-eaten"] = self.getGotEaten(
-            nextStateInfo.agentState, nextStateInfo.enemyVirtualStates
-        )
-
-        # Tie-breaking: Penalize stop and reverse
-        # exponential_penalty = self.getConsecutiveStopReversePenalty()
-        # features["stop-reverse"] = (
-        #     exponential_penalty
-        #     if action == Directions.STOP
-        #     or action
-        #     == Directions.REVERSE[stateInfo.agentState.configuration.direction]
-        #     else 0.0
-        # )
-
-        return features
-
-    def closestFood(self, pos, food, walls):
-        fringe = [(pos[0], pos[1], 0)]
-        expanded = set()
-        while fringe:
-            pos_x, pos_y, dist = fringe.pop(0)
-            if (pos_x, pos_y) in expanded:
-                continue
-            expanded.add((pos_x, pos_y))
-            # if we find a food at this location then exit
-            if food[pos_x][pos_y]:
-                return dist
-            # otherwise spread out from the location to its neighbours
-            nbrs = Actions.getLegalNeighbors((pos_x, pos_y), walls)
-            for nbr_x, nbr_y in nbrs:
-                fringe.append((nbr_x, nbr_y, dist + 1))
-        # no food found
-        return None
-
-    def stateClosestFood(self, gameState: GameState):
-        pos = gameState.getAgentPosition(self.index)
-        food = self.getFood(gameState)
-        walls = gameState.getWalls()
-        fringe = [(pos[0], pos[1], 0)]
-        expanded = set()
-        while fringe:
-            pos_x, pos_y, dist = fringe.pop(0)
-            if (pos_x, pos_y) in expanded:
-                continue
-            expanded.add((pos_x, pos_y))
-            # if we find a food at this location then exit
-            if food[pos_x][pos_y]:
-                return dist
-            # otherwise spread out from the location to its neighbours
-            nbrs = Actions.getLegalNeighbors((pos_x, pos_y), walls)
-            for nbr_x, nbr_y in nbrs:
-                fringe.append((nbr_x, nbr_y, dist + 1))
-        # no food found
-        return None
-
     def getSuccessor(self, gameState: GameState, action):
         """
         Finds the next successor which is a grid position (location tuple).
@@ -1922,18 +516,6 @@ class MixedAgent(CaptureAgent):
         else:
             return successor
 
-    def getGhostLocs(self, gameState: GameState):
-        ghosts = []
-        opAgents = CaptureAgent.getOpponents(self, gameState)
-        # Get ghost locations and states if observable
-        if opAgents:
-            for opponent in opAgents:
-                opPos = gameState.getAgentPosition(opponent)
-                opIsPacman = gameState.getAgentState(opponent).isPacman
-                if opPos and not opIsPacman:
-                    ghosts.append(opPos)
-        return ghosts
-    
     def calculate_advantages(self, gameState: GameState):
         """
         Finds the current advantages at each junct: {(x, y) : (((ally_idx, dist), (ally2_idx, dist)), num_adv)
@@ -1942,27 +524,217 @@ class MixedAgent(CaptureAgent):
         width, height = walls.width, walls.height
 
         junctions = MixedAgent.MAP_TOPOLOGY.junctions
-        advantages = {} # {(junct_x, junct_y) : (((ally_idx, dist), (ally2_idx, dist)), num_adv)}
-        team_pos = tuple((idx, gameState.getAgentPosition(idx)) 
-                         for idx in self.getTeam(gameState))
+        advantages = (
+            {}
+        )  # {(junct_x, junct_y) : (((ally_idx, dist), (ally2_idx, dist)), num_adv)}
+        team_pos = tuple(
+            (idx, gameState.getAgentPosition(idx)) for idx in self.getTeam(gameState)
+        )
         enemy_pos = set()
-        for op in (self.getOpponents(gameState)):
+        for op in self.getOpponents(gameState):
             belief = MixedAgent.OPPONENT_BELIEFS[op]
             for x in range(width):
                 for y in range(height):
                     if belief[x][y]:
                         enemy_pos.add((x, y))
-        
+
         for junct in junctions:
-            team_distances = tuple((idx, self.getMazeDistance(pos, junct)) 
-                                   for idx, pos in team_pos)
+            team_distances = tuple(
+                (idx, self.getMazeDistance(pos, junct)) for idx, pos in team_pos
+            )
             min_team_distance = min(dist for _, dist in team_distances)
-            adv = min(self.getMazeDistance(pos, junct) for pos in enemy_pos) - \
-                  min_team_distance
-            
+            adv = (
+                min(self.getMazeDistance(pos, junct) for pos in enemy_pos)
+                - min_team_distance
+            )
+
             advantages[junct] = (team_distances, adv)
-            
+
         return advantages
+
+    def _find_junctions_for_items(
+        self, items: List[Tuple[int, int]], topology: MapTopology
+    ) -> Tuple[util.Counter, set]:
+        """
+        Helper method to find all junctions associated with a list of items (food/capsules).
+
+        For each item:
+        - If item is at a junction, add that junction
+        - If item is in a corridor, add the corridor's endpoint junctions (excluding dead-ends)
+
+        Returns:
+            Counter where keys are junction positions and values are the count of items accessible from that junction
+        """
+        junctions_counter = util.Counter()
+        corridors = set()
+
+        for item_pos in items:
+            if item_pos in topology.junctions:
+                # Item is at a junction
+                junctions_counter[item_pos] += 1
+            elif item_pos in topology.tile_to_corridor:
+                # Item is in a corridor - add endpoint junctions
+                corridor = topology.corridors[topology.tile_to_corridor[item_pos]]
+                corridors.add(corridor.corridor_id)
+
+                junction_a = topology.junctions[corridor.junction_a]
+                junction_b = topology.junctions[corridor.junction_b]
+
+                # Only add actual junctions (not dead-ends)
+                if junction_a.junction_type == "junction":
+                    junctions_counter[junction_a.pos] += 1
+                if junction_b.junction_type == "junction":
+                    junctions_counter[junction_b.pos] += 1
+
+        return junctions_counter, corridors
+
+    def update_critical_junctions(self, gameState: GameState):
+        """Update cached junction sets for food and capsules when counts change."""
+        RED_FOOD = gameState.getRedFood().asList()
+        RED_CAPSULES = gameState.getRedCapsules()
+        BLUE_FOOD = gameState.getBlueFood().asList()
+        BLUE_CAPSULES = gameState.getBlueCapsules()
+        topology = MixedAgent.MAP_TOPOLOGY
+
+        # Update red food junctions
+        if len(RED_FOOD) != len(MixedAgent.RED_FOOD):
+            MixedAgent.RED_FOOD = RED_FOOD
+            junctions, corridors = self._find_junctions_for_items(
+                RED_FOOD, topology
+            )
+            MixedAgent.RED_FOOD_JUNCTIONS = junctions
+            MixedAgent.RED_FOOD_CORRIDORS = corridors
+
+        # Update red capsule junctions
+        if len(RED_CAPSULES) != len(MixedAgent.RED_CAPSULES):
+            MixedAgent.RED_CAPSULES = RED_CAPSULES
+            junctions, corridors = self._find_junctions_for_items(
+                RED_CAPSULES, topology
+            )
+            MixedAgent.RED_CAPSULE_JUNCTIONS = junctions
+            MixedAgent.RED_CAPSULE_CORRIDORS = corridors
+
+        # Update blue food junctions
+        if len(BLUE_FOOD) != len(MixedAgent.BLUE_FOOD):
+            MixedAgent.BLUE_FOOD = BLUE_FOOD
+            junctions, corridors = self._find_junctions_for_items(
+                BLUE_FOOD, topology
+            )
+            MixedAgent.BLUE_FOOD_JUNCTIONS = junctions
+            MixedAgent.BLUE_FOOD_CORRIDORS = corridors
+
+        # Update blue capsule junctions
+        if len(BLUE_CAPSULES) != len(MixedAgent.BLUE_CAPSULES):
+            MixedAgent.BLUE_CAPSULES = BLUE_CAPSULES
+            junctions, corridors = self._find_junctions_for_items(
+                BLUE_CAPSULES, topology
+            )
+            MixedAgent.BLUE_CAPSULE_JUNCTIONS = junctions
+            MixedAgent.BLUE_CAPSULE_CORRIDORS = corridors
+
+
+    def getFoodJunctions(self):
+        if self.red:
+            return MixedAgent.BLUE_FOOD_JUNCTIONS
+        else:
+            return MixedAgent.RED_FOOD_JUNCTIONS
+
+    def getCapsuleJunctions(self):
+        if self.red:
+            return MixedAgent.BLUE_CAPSULE_JUNCTIONS
+        else:
+            return MixedAgent.RED_CAPSULE_JUNCTIONS
+
+    def getFoodYouAreDefendingJunctions(self):
+        if self.red:
+            return MixedAgent.RED_FOOD_JUNCTIONS
+        else:
+            return MixedAgent.BLUE_FOOD_JUNCTIONS
+
+    def getCapsuleYouAreDefendingJunctions(self):
+        if self.red:
+            return MixedAgent.RED_CAPSULE_JUNCTIONS
+        else:
+            return MixedAgent.BLUE_CAPSULE_JUNCTIONS
+
+    def getFoodCorridors(self):
+        if self.red:
+            return MixedAgent.BLUE_FOOD_CORRIDORS
+        else:
+            return MixedAgent.RED_FOOD_CORRIDORS
+
+    def getCapsuleCorridors(self):
+        if self.red:
+            return MixedAgent.BLUE_CAPSULE_CORRIDORS
+        else:
+            return MixedAgent.RED_CAPSULE_CORRIDORS
+
+    def getFoodYouAreDefendingCorridors(self):
+        if self.red:
+            return MixedAgent.RED_FOOD_CORRIDORS
+        else:
+            return MixedAgent.BLUE_FOOD_CORRIDORS
+
+    def getCapsuleYouAreDefendingCorridors(self):
+        if self.red:
+            return MixedAgent.RED_CAPSULE_CORRIDORS
+        else:
+            return MixedAgent.BLUE_CAPSULE_CORRIDORS
+
+    def getFood(self):
+        if self.red:
+            return MixedAgent.BLUE_FOOD
+        else:
+            return MixedAgent.RED_FOOD
+
+    def getFoodYouAreDefending(self):
+        if self.red:
+            return MixedAgent.RED_FOOD
+        else:
+            return MixedAgent.BLUE_FOOD
+
+    def getCapsules(self):
+        if self.red:
+            return MixedAgent.BLUE_CAPSULES
+        else:
+            return MixedAgent.RED_CAPSULES
+
+    def getCapsulesYouAreDefending(self):
+        if self.red:
+            return MixedAgent.RED_CAPSULES
+        else:
+            return MixedAgent.BLUE_CAPSULES
+
+    def getEscapePoints(self):
+        width, height = self.walls.width, self.walls.height
+        escape_points = []
+        if self.red:
+            x_border = width // 2 - 1
+        else:
+            x_border = width // 2
+
+        for y in range(height):
+            if not self.walls[x_border][y]:
+                escape_points.append((x_border, y))
+
+        return escape_points
+
+
+    def getEscapePointsYouAreDefending(self):
+        width, height = self.walls.width, self.walls.height
+        escape_points = []
+        if self.red:
+            x_border = width // 2
+        else:
+            x_border = width // 2 - 1
+
+        for y in range(height):
+            if not self.walls[x_border][y]:
+                escape_points.append((x_border, y))
+
+        return escape_points
+
+
 # ==================== Topological Map Preprocessing ====================
 
 
@@ -2351,8 +1123,12 @@ def find_dead_end_zones(
     center_x, center_y = width // 2, height // 2
     start_pos = None
     for dx in range(max(width, height)):
-        for sx, sy in [(center_x + dx, center_y), (center_x - dx, center_y),
-                       (center_x, center_y + dx), (center_x, center_y - dx)]:
+        for sx, sy in [
+            (center_x + dx, center_y),
+            (center_x - dx, center_y),
+            (center_x, center_y + dx),
+            (center_x, center_y - dx),
+        ]:
             if 0 <= sx < width and 0 <= sy < height and not walls[sx][sy]:
                 start_pos = (sx, sy)
                 break
@@ -2398,7 +1174,9 @@ def find_dead_end_zones(
                     unreachable_tiles.append(pos)
 
         # Only mark this as a dead-end zone if it's small (not the main map)
-        total_non_wall_tiles = sum(1 for x in range(width) for y in range(height) if not walls[x][y])
+        total_non_wall_tiles = sum(
+            1 for x in range(width) for y in range(height) if not walls[x][y]
+        )
 
         if unreachable_tiles and len(unreachable_tiles) < total_non_wall_tiles * 0.5:
             # Store this zone temporarily
@@ -2429,7 +1207,9 @@ def find_dead_end_zones(
 
 
 @profile
-def initialize_beliefs(game_state: GameState, agents=None) -> Dict[int, List[List[float]]]:
+def initialize_beliefs(
+    game_state: GameState, agents=None
+) -> Dict[int, List[List[float]]]:
     """
     Initialize belief distributions for all 4 agents to their exact starting positions.
 
@@ -2489,7 +1269,9 @@ def update_belief(
     walls = game_state.getWalls()
     width, height = walls.width, walls.height
 
-    assert sum(sum(i) for i in prev_belief) > 0.5, f"lost track of opponent {opponent_idx}"
+    assert (
+        sum(sum(i) for i in prev_belief) > 0.5
+    ), f"lost track of opponent {opponent_idx}"
 
     # Step 1: Check if opponent is visible
     if game_state.getAgentPosition(opponent_idx) is not None:
@@ -2533,9 +1315,12 @@ def update_belief(
                 prior = prev_belief[x][y]
                 true_dist = manhattanDistance(observer_pos, (x, y))
                 likelihood = game_state.getDistanceProb(true_dist, noisy_dist)
-                teammate_dist = manhattanDistance(game_state.getAgentPosition((observer_idx + 2) % 4),
-                                                  (x, y))
-                if min(true_dist, teammate_dist) > 5: # we know that the position is not in our sight range
+                teammate_dist = manhattanDistance(
+                    game_state.getAgentPosition((observer_idx + 2) % 4), (x, y)
+                )
+                if (
+                    min(true_dist, teammate_dist) > 5
+                ):  # we know that the position is not in our sight range
                     updated_belief[x][y] = prior * likelihood
 
     # Step 4: Normalize
@@ -2544,8 +1329,8 @@ def update_belief(
         for x in range(width):
             for y in range(height):
                 updated_belief[x][y] /= total_prob
-    else: # we lost track of opponent. this (probably) always means that they just
-          # died. so we reinitialize beliefs for this opponent
+    else:  # we lost track of opponent. this (probably) always means that they just
+        # died. so we reinitialize beliefs for this opponent
         updated_belief = initialize_beliefs(game_state, [opponent_idx])[opponent_idx]
         # need to propagate from their spawn if they just moved
         prev_agent_idx = (observer_idx - 1) % 4
@@ -2564,7 +1349,6 @@ def update_belief(
                             new_beliefs[nx][ny] += prob_per_neighbor
 
             updated_belief = new_beliefs
-
 
     return updated_belief
 
@@ -2605,15 +1389,23 @@ def update_all_beliefs(
     return updated_beliefs
 
 
-#====================SEARCH STUFF==========================================
+# ====================SEARCH STUFF==========================================
 
 from lib_piglet.utils.tools import eprint
-from lib_piglet.search import tree_search, graph_search,base_search,search_node, iterative_deepening,graph_search_anytime
-from lib_piglet.utils.data_structure import queue,stack,bin_heap
+from lib_piglet.search import (
+    tree_search,
+    graph_search,
+    base_search,
+    search_node,
+    iterative_deepening,
+    graph_search_anytime,
+)
+from lib_piglet.utils.data_structure import queue, stack, bin_heap
 from lib_piglet.expanders.base_expander import base_expander
 from lib_piglet.solution.solution import solution_to_state_list
 
 debug = False
+
 
 def getPossibleActions(pos, walls):
     possible = []
@@ -2624,28 +1416,31 @@ def getPossibleActions(pos, walls):
         dx, dy = vec
         next_y = y_int + dy
         next_x = x_int + dx
-        if not walls[next_x][next_y]: possible.append(dir)
+        if not walls[next_x][next_y]:
+            possible.append(dir)
 
     return possible
 
-class PacAct():
+
+class PacAct:
     def __init__(self, cost):
         self.cost_ = cost
 
+
 # The search state is a tuple of location and interception time from path start
 # (x, y, int), with the default value for int being -1
-    
-class pacman_expander(base_expander):
 
+
+class pacman_expander(base_expander):
     def __init__(self, gameState: GameState, agent: MixedAgent, max_timestep=9999):
         self.domain_ = agent
-        self.domain_.is_goal = lambda node, goals: any(all(node[i] == goal[i] for i in range(2))
-                                                      for goal in goals)
+        self.domain_.is_goal = lambda node, goals: any(
+            all(node[i] == goal[i] for i in range(2)) for goal in goals
+        )
         self.gameState = gameState
         self.succ_: list = []
         self.max_timestep = max_timestep
         self.verbose = False
-
 
     def expand(self, current_node: search_node):
         self.succ_.clear()
@@ -2674,20 +1469,25 @@ class pacman_expander(base_expander):
                 # < 0 means something has slipped through.
 
                 # we still have adv / we've already been intercepted / 0 adv and in home
-                if adv > 0 or \
-                   inter >= 0 or \
-                   (adv == 0 and self.domain_.isInHome(new_pos, self.gameState)):
+                if (
+                    adv > 0
+                    or inter >= 0
+                    or (adv == 0 and self.domain_.isInHome(new_pos, self.gameState))
+                ):
                     successors_acts.append(((*new_pos, inter), PacAct(1)))
                 # we just got intercepted/slipped past
                 else:
-                    successors_acts.append(((*new_pos, current_node.g_+ (adv // 2) + 1), PacAct(1)))    
+                    successors_acts.append(
+                        ((*new_pos, current_node.g_ + (adv // 2) + 1), PacAct(1))
+                    )
             else:
                 successors_acts.append(((*new_pos, inter), PacAct(1)))
-                
+
         return successors_acts
 
     def __str__(self):
         return self.domain_.domain_file_
+
 
 # = true_maze_dist + (99999 - intercept_time) IF intercept time >= 0
 # ELSE = true_maze_dist
@@ -2695,30 +1495,39 @@ class pacman_expander(base_expander):
 # ALWAYS PASS IN AN ITERABLE OF GOAL STATES
 def offensive_heuristic(domain: MixedAgent, current_state, goal_state):
     agent = domain
-    dist = min(agent.getMazeDistance(current_state[:2], g_state[:2])
-               for g_state in goal_state)
+    dist = min(
+        agent.getMazeDistance(current_state[:2], g_state[:2]) for g_state in goal_state
+    )
     inter_time = current_state[-1]
     if inter_time >= 0:
         dist += 99999999 - inter_time * 500
     return dist
 
+
 from collections.abc import Iterable
 
-def get_path(start: tuple, goals: Iterable, agent: MixedAgent, gameState: GameState, 
-             heuristic, max_timestep: int = None):
 
+def get_path(
+    start: tuple,
+    goals: Iterable,
+    agent: MixedAgent,
+    gameState: GameState,
+    heuristic,
+    max_timestep: int = None,
+):
     if not hasattr(get_path, "pac_searcher"):
         open_lst = bin_heap(search_node.compare_node_f)
-        get_path.pac_searcher = graph_search.graph_search(open_lst,
-                                                           expander=pacman_expander(gameState, agent), 
-                                                           heuristic_function=heuristic)
+        get_path.pac_searcher = graph_search.graph_search(
+            open_lst,
+            expander=pacman_expander(gameState, agent),
+            heuristic_function=heuristic,
+        )
     else:
         get_path.pac_searcher.expander_.domain_ = agent
         get_path.pac_searcher.expander_.gameState = gameState
 
-
     assert isinstance(goals[0], Iterable), "goals should be an iterable of state tuples"
-        
+
     path = get_path.pac_searcher.get_path((*start, -1), goals)
     assert path is not None, "didn't find any valid paths? this should not happen"
 
