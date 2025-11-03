@@ -468,6 +468,7 @@ class MixedAgent(CaptureAgent):
             if len(next_actions) == 0:  # trapped. try to run
                 max_adv = -999
                 die_acts = []
+                best_next = []
                 for action, next_pos, successor, advantages in trapped_actions:
                     adv = self.get_advantage(
                         next_pos, successor, advantages, teammate=self.index
@@ -486,8 +487,8 @@ class MixedAgent(CaptureAgent):
                         continue
                     if adv > max_adv:
                         max_adv = adv
-                        best_next = [(action, next_pos)]
-                if max_adv == -999:
+                        best_next.append(action, next_pos)
+                if not best_next:
                     best_next = [die_acts[0]]
 
             elif len(next_actions) > 1:
@@ -513,7 +514,6 @@ class MixedAgent(CaptureAgent):
             else:
                 best_next = [next_actions[0][:2]]
 
-            # print(best_next, len(next_actions) == 0)
             return best_next
 
         elif highLevelAction == "attack":
@@ -676,12 +676,12 @@ class MixedAgent(CaptureAgent):
 
             escape_points = self.getEscapePoints() + self.getCapsules()
 
-            #print(gameState.getAgentPosition(self.index))
-            #print(
-            #    [(border, self.get_advantage(
-            #        border, gameState, MixedAgent.CURRENT_ADVANTAGES, teammate=self.index
-            #    ))
-            #    for border in escape_points])
+            print(gameState.getAgentPosition(self.index))
+            print(
+                [(border, self.get_advantage(
+                    border, gameState, MixedAgent.CURRENT_ADVANTAGES, teammate=self.index
+                ))
+                for border in escape_points])
             legalActions = gameState.getLegalActions(self.index)
             for action in legalActions:
                 successor = self.getSuccessor(gameState, action)
@@ -866,9 +866,9 @@ class MixedAgent(CaptureAgent):
                 
             if not best_next:
                 best_next = trapped_actions
-                #print(trapped_actions)
-                #print("trapped")
-                #exit()
+                print(trapped_actions)
+                print("trapped")
+                exit()
             actual_best = best_next[0]
 
             width, height = self.walls.width, self.walls.height
