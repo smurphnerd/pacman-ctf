@@ -299,6 +299,7 @@ class MixedAgent(CaptureAgent):
                 act = "attack"
             else:
                 act = "defend"
+            print(act)
             self.lowLevelPlan = self.getLowLevelPlanHS(gameState, act)
             self.lowLevelActionIndex = 0
 
@@ -514,6 +515,10 @@ class MixedAgent(CaptureAgent):
             else:
                 best_next = [next_actions[0][:2]]
 
+            if not best_next:
+                successor = self.getSuccessor(gameState, legalActions[0])
+                next_pos = successor.getAgentPosition(self.index)
+                best_next = [(legalActions[0], next_pos)]
             return best_next
 
         elif highLevelAction == "attack":
@@ -676,12 +681,12 @@ class MixedAgent(CaptureAgent):
 
             escape_points = self.getEscapePoints() + self.getCapsules()
 
-            #print(gameState.getAgentPosition(self.index))
-            #print(
-            #    [(border, self.get_advantage(
-            #        border, gameState, MixedAgent.CURRENT_ADVANTAGES, teammate=self.index
-            #    ))
-            #    for border in escape_points])
+            print(gameState.getAgentPosition(self.index))
+            print(
+                [(border, self.get_advantage(
+                    border, gameState, MixedAgent.CURRENT_ADVANTAGES, teammate=self.index
+                ))
+                for border in escape_points])
             legalActions = gameState.getLegalActions(self.index)
             for action in legalActions:
                 successor = self.getSuccessor(gameState, action)
@@ -866,9 +871,6 @@ class MixedAgent(CaptureAgent):
                 
             if not best_next:
                 best_next = trapped_actions
-                print(trapped_actions)
-                print("trapped")
-                exit()
             actual_best = best_next[0]
 
             width, height = self.walls.width, self.walls.height
