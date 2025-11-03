@@ -214,44 +214,7 @@ class MixedAgent(CaptureAgent):
         This function write weights into files after the game is over.
         You may want to comment (disallow) this function when submit to contest server.
         """
-
-    def updateEstimatedPositions(self, gameState: GameState):
-        """
-        Cache estimated enemy positions using belief tracking.
-        Called once per turn for efficiency. O(num_enemies * w * h)
-        """
-
-        walls = gameState.getWalls()
-
-        for enemy_idx in self.getOpponents(gameState):
-            enemy_state = gameState.getAgentState(enemy_idx)
-            exact_pos = enemy_state.getPosition()
-
-            if exact_pos is not None:
-                # Enemy is observable - use exact position
-                MixedAgent.ESTIMATED_POSITIONS[enemy_idx] = exact_pos
-            elif enemy_idx in MixedAgent.OPPONENT_BELIEFS:
-                # Enemy not observable - estimate using belief distribution
-                belief_grid = MixedAgent.OPPONENT_BELIEFS[enemy_idx]
-                # belief_grid is a 2D list: belief_grid[x][y]
-                # Convert to numpy array and find max probability position
-                belief_array = np.array(belief_grid)
-                max_idx = np.unravel_index(np.argmax(belief_array), belief_array.shape)
-                estimated_pos = (max_idx[0], max_idx[1])
-
-                # Validate position is not a wall
-                if not walls[int(estimated_pos[0])][int(estimated_pos[1])]:
-                    MixedAgent.ESTIMATED_POSITIONS[enemy_idx] = estimated_pos
-                else:
-                    # Position is a wall, use start position as fallback
-                    MixedAgent.ESTIMATED_POSITIONS[
-                        enemy_idx
-                    ] = gameState.getInitialAgentPosition(enemy_idx)
-            else:
-                # Fallback: no position estimate available, use start position
-                MixedAgent.ESTIMATED_POSITIONS[
-                    enemy_idx
-                ] = gameState.getInitialAgentPosition(enemy_idx)
+        pass
 
     @profile
     def chooseAction(self, gameState: GameState):
@@ -269,14 +232,8 @@ class MixedAgent(CaptureAgent):
             MixedAgent.OPPONENT_BELIEFS, gameState, self.index
         )
 
-        # Cache estimated enemy positions for this turn (computed once, reused many times)
-        self.updateEstimatedPositions(gameState)
-
         # Update advantages at all junctions
         MixedAgent.CURRENT_ADVANTAGES = self.calculate_advantages(gameState)
-
-        # Find critical attacking and defending junctions
-        self.update_critical_junctions(gameState)
 
         # TODO uncomment
         # -------------High Level Plan Section-------------------
@@ -452,32 +409,7 @@ class MixedAgent(CaptureAgent):
         pos = gameState.getAgentPosition(self.index)
         # Find an attack if possible
         if highLevelAction == "default-attack":
-            heuristic = offensive_heuristic
-            goals = []
-            # If we are at a critical capsule junction, try to get capsule
-            if pos in self.getCapsuleJunctions():
-                goals = self.getCapsules()
-            # If we are at a capsule corridor, try to get capsule
-            elif (
-                MixedAgent.MAP_TOPOLOGY.tile_to_corridor.get(pos)
-                in self.getCapsuleCorridors()
-            ):
-                goals = self.getCapsules()
-            # If we are already at a critical food junction, try to get food
-            elif pos in self.getFoodJunctions():
-                goals = self.getFood()
-            # If we are at a food corridor, try to get food
-            elif (
-                MixedAgent.MAP_TOPOLOGY.tile_to_corridor.get(pos)
-                in self.getFoodCorridors()
-            ):
-                goals = self.getFood()
-            # Try to get to one of the food junctions
-            else:
-                goals = list(self.getFoodJunctions().keys())
-
-            # TODO: If we're going to die, we need to reevaluate the goal
-            path, intercept_t = get_path(pos, goals, self, gameState, heuristic)
+            pass
 
         elif highLevelAction == "escape":
             best_action, best_next_pos, max_advantage = Directions.STOP, pos, 0.0
@@ -1072,130 +1004,6 @@ class MixedAgent(CaptureAgent):
         if op_min_dist > max_lookahead:
             return 1
         return adv
-
-    def _find_junctions_for_items(
-        self, items: List[Tuple[int, int]], topology: MapTopology
-    ) -> Tuple[util.Counter, set]:
-        """
-        Helper method to find all junctions associated with a list of items (food/capsules).
-
-        For each item:
-        - If item is at a junction, add that junction
-        - If item is in a corridor, add the corridor's endpoint junctions (excluding dead-ends)
-
-        Returns:
-            Counter where keys are junction positions and values are the count of items accessible from that junction
-        """
-        junctions_counter = util.Counter()
-        corridors = set()
-
-        for item_pos in items:
-            if item_pos in topology.junctions:
-                # Item is at a junction
-                junctions_counter[item_pos] += 1
-            elif item_pos in topology.tile_to_corridor:
-                # Item is in a corridor - add endpoint junctions
-                corridor = topology.corridors[topology.tile_to_corridor[item_pos]]
-                corridors.add(corridor.corridor_id)
-
-                junction_a = topology.junctions[corridor.junction_a]
-                junction_b = topology.junctions[corridor.junction_b]
-
-                # Only add actual junctions (not dead-ends)
-                if junction_a.junction_type == "junction":
-                    junctions_counter[junction_a.pos] += 1
-                if junction_b.junction_type == "junction":
-                    junctions_counter[junction_b.pos] += 1
-
-        return junctions_counter, corridors
-
-    def update_critical_junctions(self, gameState: GameState):
-        """Update cached junction sets for food and capsules when counts change."""
-        RED_FOOD = gameState.getRedFood().asList()
-        RED_CAPSULES = gameState.getRedCapsules()
-        BLUE_FOOD = gameState.getBlueFood().asList()
-        BLUE_CAPSULES = gameState.getBlueCapsules()
-        topology = MixedAgent.MAP_TOPOLOGY
-
-        # Update red food junctions
-        if len(RED_FOOD) != len(MixedAgent.RED_FOOD):
-            MixedAgent.RED_FOOD = RED_FOOD
-            junctions, corridors = self._find_junctions_for_items(RED_FOOD, topology)
-            MixedAgent.RED_FOOD_JUNCTIONS = junctions
-            MixedAgent.RED_FOOD_CORRIDORS = corridors
-
-        # Update red capsule junctions
-        if len(RED_CAPSULES) != len(MixedAgent.RED_CAPSULES):
-            MixedAgent.RED_CAPSULES = RED_CAPSULES
-            junctions, corridors = self._find_junctions_for_items(
-                RED_CAPSULES, topology
-            )
-            MixedAgent.RED_CAPSULE_JUNCTIONS = junctions
-            MixedAgent.RED_CAPSULE_CORRIDORS = corridors
-
-        # Update blue food junctions
-        if len(BLUE_FOOD) != len(MixedAgent.BLUE_FOOD):
-            MixedAgent.BLUE_FOOD = BLUE_FOOD
-            junctions, corridors = self._find_junctions_for_items(BLUE_FOOD, topology)
-            MixedAgent.BLUE_FOOD_JUNCTIONS = junctions
-            MixedAgent.BLUE_FOOD_CORRIDORS = corridors
-
-        # Update blue capsule junctions
-        if len(BLUE_CAPSULES) != len(MixedAgent.BLUE_CAPSULES):
-            MixedAgent.BLUE_CAPSULES = BLUE_CAPSULES
-            junctions, corridors = self._find_junctions_for_items(
-                BLUE_CAPSULES, topology
-            )
-            MixedAgent.BLUE_CAPSULE_JUNCTIONS = junctions
-            MixedAgent.BLUE_CAPSULE_CORRIDORS = corridors
-
-    def getFoodJunctions(self):
-        if self.red:
-            return MixedAgent.BLUE_FOOD_JUNCTIONS
-        else:
-            return MixedAgent.RED_FOOD_JUNCTIONS
-
-    def getCapsuleJunctions(self):
-        if self.red:
-            return MixedAgent.BLUE_CAPSULE_JUNCTIONS
-        else:
-            return MixedAgent.RED_CAPSULE_JUNCTIONS
-
-    def getFoodYouAreDefendingJunctions(self):
-        if self.red:
-            return MixedAgent.RED_FOOD_JUNCTIONS
-        else:
-            return MixedAgent.BLUE_FOOD_JUNCTIONS
-
-    def getCapsuleYouAreDefendingJunctions(self):
-        if self.red:
-            return MixedAgent.RED_CAPSULE_JUNCTIONS
-        else:
-            return MixedAgent.BLUE_CAPSULE_JUNCTIONS
-
-    def getFoodCorridors(self):
-        if self.red:
-            return MixedAgent.BLUE_FOOD_CORRIDORS
-        else:
-            return MixedAgent.RED_FOOD_CORRIDORS
-
-    def getCapsuleCorridors(self):
-        if self.red:
-            return MixedAgent.BLUE_CAPSULE_CORRIDORS
-        else:
-            return MixedAgent.RED_CAPSULE_CORRIDORS
-
-    def getFoodYouAreDefendingCorridors(self):
-        if self.red:
-            return MixedAgent.RED_FOOD_CORRIDORS
-        else:
-            return MixedAgent.BLUE_FOOD_CORRIDORS
-
-    def getCapsuleYouAreDefendingCorridors(self):
-        if self.red:
-            return MixedAgent.RED_CAPSULE_CORRIDORS
-        else:
-            return MixedAgent.BLUE_CAPSULE_CORRIDORS
 
     def getFood(self):
         if self.red:
