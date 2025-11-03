@@ -299,7 +299,6 @@ class MixedAgent(CaptureAgent):
                 act = "attack"
             else:
                 act = "defend"
-            print(act)
             self.lowLevelPlan = self.getLowLevelPlanHS(gameState, act)
             self.lowLevelActionIndex = 0
 
@@ -679,14 +678,6 @@ class MixedAgent(CaptureAgent):
                 if gameState.getAgentPosition(i) is not None
             )
 
-            escape_points = self.getEscapePoints() + self.getCapsules()
-
-            print(gameState.getAgentPosition(self.index))
-            print(
-                [(border, self.get_advantage(
-                    border, gameState, MixedAgent.CURRENT_ADVANTAGES, teammate=self.index
-                ))
-                for border in escape_points])
             legalActions = gameState.getLegalActions(self.index)
             for action in legalActions:
                 successor = self.getSuccessor(gameState, action)
@@ -1016,11 +1007,11 @@ class MixedAgent(CaptureAgent):
     def get_advantage(
         self, pos, gameState, advantages, teammate=None, enemy=None, max_lookahead=50
     ):
-        if not teammate:
+        if teammate is None:
             teammate = self.getTeam(gameState)
         else:
             teammate = (teammate,)
-        if not enemy:
+        if enemy is None:
             enemy = self.getOpponents(gameState)
         else:
             enemy = (enemy,)
