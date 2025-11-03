@@ -1054,13 +1054,13 @@ class MixedAgent(CaptureAgent):
                 MixedAgent.BLUE_ESCAPE_POINTS.append((blue_x_border, y))
 
     def getEscapePoints(self):
-        if self.red:
+        if not self.red:
             return MixedAgent.BLUE_ESCAPE_POINTS
         else:
             return MixedAgent.RED_ESCAPE_POINTS
 
     def getEscapePointsYouAreDefending(self):
-        if self.red:
+        if not self.red:
             return MixedAgent.RED_ESCAPE_POINTS
         else:
             return MixedAgent.BLUE_ESCAPE_POINTS
