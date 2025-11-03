@@ -134,8 +134,8 @@ class MixedAgent(CaptureAgent):
     RED_CAPSULE_CORRIDORS = set()
     BLUE_FOOD_CORRIDORS = set()
     BLUE_CAPSULE_CORRIDORS = set()
-    RED_ESCAPE_POINTS = set()
-    BLUE_ESCAPE_POINTS = set()
+    RED_ESCAPE_POINTS = []
+    BLUE_ESCAPE_POINTS = []
 
     def registerInitialState(self, gameState: GameState):
         self.pddl_solver = pddl_solver(BASE_FOLDER + "/myTeam.pddl")
@@ -1226,10 +1226,10 @@ class MixedAgent(CaptureAgent):
 
         for y in range(height):
             if not self.walls[red_x_border][y]:
-                MixedAgent.RED_ESCAPE_POINTS.add((red_x_border, y))
+                MixedAgent.RED_ESCAPE_POINTS.append((red_x_border, y))
 
             if not self.walls[blue_x_border][y]:
-                MixedAgent.BLUE_ESCAPE_POINTS.add((blue_x_border, y))
+                MixedAgent.BLUE_ESCAPE_POINTS.append((blue_x_border, y))
 
     def getEscapePoints(self):
         if self.red:
