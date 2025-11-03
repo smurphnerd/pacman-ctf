@@ -231,11 +231,12 @@ class MixedAgent(CaptureAgent):
             MixedAgent.OPPONENT_BELIEFS, gameState, self.index
         )
 
-        # Update advantages at all junctions
-        MixedAgent.CURRENT_ADVANTAGES = self.calculate_advantages(gameState)
 
         # Find critical attacking and defending junctions
         self.update_critical_junctions(gameState)
+
+        # Update advantages at all junctions
+        MixedAgent.CURRENT_ADVANTAGES = self.calculate_advantages(gameState)
 
         # TODO uncomment
         # -------------High Level Plan Section-------------------
@@ -961,7 +962,8 @@ class MixedAgent(CaptureAgent):
 
 
         tiles = set(self.getFood() + self.getFoodYouAreDefending() + self.getCapsules() + \
-            self.getCapsulesYouAreDefending() + self.getEscapePoints() + self.getEscapePointsYouAreDefending())
+            self.getCapsulesYouAreDefending() + self.getEscapePoints() + self.getEscapePointsYouAreDefending() + \
+            [gameState.getAgentPosition(self.index)])
         
         for x in range(width):
             for y in range(height):
