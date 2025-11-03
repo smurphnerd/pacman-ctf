@@ -134,6 +134,8 @@ class MixedAgent(CaptureAgent):
     RED_CAPSULE_CORRIDORS = set()
     BLUE_FOOD_CORRIDORS = set()
     BLUE_CAPSULE_CORRIDORS = set()
+    RED_ESCAPE_POINTS = []
+    BLUE_ESCAPE_POINTS = []
 
     def registerInitialState(self, gameState: GameState):
         self.pddl_solver = pddl_solver(BASE_FOLDER + "/myTeam.pddl")
@@ -204,50 +206,14 @@ class MixedAgent(CaptureAgent):
         MixedAgent.CURRENT_ACTION[self.index] = {}
 
         self.update_critical_junctions(gameState)
+        self.initializeEscapePoints()
 
     def final(self, gameState: GameState):
         """
         This function write weights into files after the game is over.
         You may want to comment (disallow) this function when submit to contest server.
         """
-
-    def updateEstimatedPositions(self, gameState: GameState):
-        """
-        Cache estimated enemy positions using belief tracking.
-        Called once per turn for efficiency. O(num_enemies * w * h)
-        """
-
-        walls = gameState.getWalls()
-
-        for enemy_idx in self.getOpponents(gameState):
-            enemy_state = gameState.getAgentState(enemy_idx)
-            exact_pos = enemy_state.getPosition()
-
-            if exact_pos is not None:
-                # Enemy is observable - use exact position
-                MixedAgent.ESTIMATED_POSITIONS[enemy_idx] = exact_pos
-            elif enemy_idx in MixedAgent.OPPONENT_BELIEFS:
-                # Enemy not observable - estimate using belief distribution
-                belief_grid = MixedAgent.OPPONENT_BELIEFS[enemy_idx]
-                # belief_grid is a 2D list: belief_grid[x][y]
-                # Convert to numpy array and find max probability position
-                belief_array = np.array(belief_grid)
-                max_idx = np.unravel_index(np.argmax(belief_array), belief_array.shape)
-                estimated_pos = (max_idx[0], max_idx[1])
-
-                # Validate position is not a wall
-                if not walls[int(estimated_pos[0])][int(estimated_pos[1])]:
-                    MixedAgent.ESTIMATED_POSITIONS[enemy_idx] = estimated_pos
-                else:
-                    # Position is a wall, use start position as fallback
-                    MixedAgent.ESTIMATED_POSITIONS[
-                        enemy_idx
-                    ] = gameState.getInitialAgentPosition(enemy_idx)
-            else:
-                # Fallback: no position estimate available, use start position
-                MixedAgent.ESTIMATED_POSITIONS[
-                    enemy_idx
-                ] = gameState.getInitialAgentPosition(enemy_idx)
+        pass
 
     @profile
     def chooseAction(self, gameState: GameState):
@@ -259,17 +225,17 @@ class MixedAgent(CaptureAgent):
         Then generate low-level action (up down left right wait) to achieve the high-level action.
         """
 
+        if gameState.getAgentState(self.index).getPosition() == self.startPosition:
+            if self.debug:
+                print(f"Agent {self.index} died")
         # Update belief tracking for opponents
 
         MixedAgent.OPPONENT_BELIEFS = update_all_beliefs(
             MixedAgent.OPPONENT_BELIEFS, gameState, self.index
         )
 
-        # Cache estimated enemy positions for this turn (computed once, reused many times)
-        self.updateEstimatedPositions(gameState)
-
         # Update advantages at all junctions
-        self.calculate_advantages(gameState)
+        self.advantages = self.calculate_advantages(gameState)
 
         # Find critical attacking and defending junctions
         self.update_critical_junctions(gameState)
@@ -321,6 +287,8 @@ class MixedAgent(CaptureAgent):
         if not self.posSatisfyLowLevelPlan(gameState):
             # TODO just hardcoding defend for now
             self.lowLevelPlan = self.getLowLevelPlanHS(gameState, "defend")
+            if self.debug:
+                print(f"Agent {self.index} chose {self.lowLevelPlan[0][0]}")
             self.lowLevelActionIndex = 0
 
         # Safety check in case plan is still empty
@@ -339,7 +307,6 @@ class MixedAgent(CaptureAgent):
 
     # ------------------------------- PDDL and High-Level Action Functions -------------------------------
 
-    @profile
     def getHighLevelPlan(
         self, objects, initState, positiveGoal, negtiveGoal
     ) -> List[Tuple[Action, pddl_state]]:
@@ -356,14 +323,12 @@ class MixedAgent(CaptureAgent):
         # Solve the problem and return the plan
         return self.pddl_solver.solve()
 
-    @profile
     def get_pddl_state(self, gameState: GameState) -> Tuple[List[Tuple], List[Tuple]]:
         """
         This function collects pddl :objects and :init states from simulator gameState.
         """
         pass
 
-    @profile
     def stateSatisfyCurrentPlan(
         self, init_state: List[Tuple], positiveGoal, negtiveGoal
     ):
@@ -405,7 +370,6 @@ class MixedAgent(CaptureAgent):
         # Current action precondition not satisfied anymore, need new plan
         return False
 
-    @profile
     def getGoals(self, objects: List[Tuple], initState: List[Tuple]):
         """
         Multi-tiered goal prioritization system based on game state.
@@ -428,15 +392,73 @@ class MixedAgent(CaptureAgent):
             return False
         return True
 
+    @profile
     def lowLevelDefault(self, gameState: GameState, actions):
         pos = gameState.getAgentPosition(self.index)
         max_positive_count = -1
         best_next = []
         valid_moves = []
 
-        for action in actions:
+        # Cache topology attributes to avoid repeated attribute lookups
+        junctions = MixedAgent.MAP_TOPOLOGY.junctions
+        dead_end_zones = MixedAgent.MAP_TOPOLOGY.dead_end_zones
+        tile_to_corridor = MixedAgent.MAP_TOPOLOGY.tile_to_corridor
+        corridors = MixedAgent.MAP_TOPOLOGY.corridors
+
+        # Find closest food where we have advantage > 1 and are closer than teammate
+        target_food = None
+        target_food_is_capsule = False
+        min_food_dist = float("inf")
+        current_advantages = self.advantages
+        teammate_index = (self.index + 2) % 4
+        teammate_pos = gameState.getAgentPosition(teammate_index)
+
+        for food in self.getFood():
+            my_advantage = self.get_advantage(
+                food, gameState, current_advantages, teammate=self.index
+            )
+
+            # Check if we have advantage > 1 (closer than enemies by at least 1)
+            if my_advantage >= 1:
+                my_dist = self.getMazeDistance(pos, food)
+                teammate_dist = (
+                    self.getMazeDistance(teammate_pos, food)
+                    if teammate_pos
+                    else float("inf")
+                )
+
+                # Also require being closer than teammate
+                if my_dist < teammate_dist and my_dist < min_food_dist:
+                    min_food_dist = my_dist
+                    target_food = food
+
+        for food in self.getCapsules():
+            my_advantage = self.get_advantage(
+                food, gameState, current_advantages, teammate=self.index
+            )
+
+            # Check if we have advantage > 1 (closer than enemies by at least 1)
+            if my_advantage >= 1:
+                my_dist = self.getMazeDistance(pos, food)
+                teammate_dist = (
+                    self.getMazeDistance(teammate_pos, food)
+                    if teammate_pos
+                    else float("inf")
+                )
+
+                # Also require being closer than teammate
+                if my_dist < teammate_dist and (
+                    not target_food_is_capsule or my_dist < min_food_dist
+                ):
+                    min_food_dist = my_dist
+                    target_food = food
+                    target_food_is_capsule = True
+
+        if self.debug:
+            print(f"Target food for Agent {self.index} is {target_food}")
+
+        for action, advantages in actions:
             successor = self.getSuccessor(gameState, action)
-            advantages = self.calculate_advantages(successor)
             is_pacman = successor.getAgentState(self.index).isPacman
 
             succ_pos = successor.getAgentPosition(self.index)
@@ -454,44 +476,25 @@ class MixedAgent(CaptureAgent):
                     if gameState.getAgentState(i).scaredTimer > 0:
                         continue
                     opp_pos = successor.getAgentPosition(i)
-                    if (
-                        isinstance(opp_pos, tuple)
-                        and opp_pos in MixedAgent.MAP_TOPOLOGY.dead_end_zones
-                    ):
-                        exit_pos = MixedAgent.MAP_TOPOLOGY.dead_end_zones[opp_pos]
+                    if isinstance(opp_pos, tuple) and opp_pos in dead_end_zones:
+                        exit_pos = dead_end_zones[opp_pos]
 
                         # We are at the exit already or in a dead end
                         if pos == exit_pos or (
-                            pos in MixedAgent.MAP_TOPOLOGY.dead_end_zones
-                            and MixedAgent.MAP_TOPOLOGY.dead_end_zones[pos] == exit_pos
+                            pos in dead_end_zones and dead_end_zones[pos] == exit_pos
                         ):
                             # If corridor, follow corridor
-                            if opp_pos in MixedAgent.MAP_TOPOLOGY.tile_to_corridor or (
-                                opp_pos in MixedAgent.MAP_TOPOLOGY.junctions
-                                and MixedAgent.MAP_TOPOLOGY.junctions[
-                                    opp_pos
-                                ].junction_type
-                                == "dead_end"
+                            if opp_pos in tile_to_corridor or (
+                                opp_pos in junctions
+                                and junctions[opp_pos].junction_type == "dead_end"
                             ):
-                                if opp_pos in MixedAgent.MAP_TOPOLOGY.junctions:
-                                    target = MixedAgent.MAP_TOPOLOGY.junctions[
-                                        opp_pos
-                                    ].pos
+                                if opp_pos in junctions:
+                                    target = junctions[opp_pos].pos
                                 else:
-                                    corridor_id = (
-                                        MixedAgent.MAP_TOPOLOGY.tile_to_corridor[
-                                            opp_pos
-                                        ]
-                                    )
-                                    corridor = MixedAgent.MAP_TOPOLOGY.corridors[
-                                        corridor_id
-                                    ]
-                                    junction_a = MixedAgent.MAP_TOPOLOGY.junctions[
-                                        corridor.junction_a
-                                    ]
-                                    junction_b = MixedAgent.MAP_TOPOLOGY.junctions[
-                                        corridor.junction_b
-                                    ]
+                                    corridor_id = tile_to_corridor[opp_pos]
+                                    corridor = corridors[corridor_id]
+                                    junction_a = junctions[corridor.junction_a]
+                                    junction_b = junctions[corridor.junction_b]
                                     target = (
                                         junction_a.pos
                                         if junction_a.junction_type == "dead_end"
@@ -526,63 +529,62 @@ class MixedAgent(CaptureAgent):
 
             if is_pacman:
                 # # Skip positions where we'll be trapped
-                # if succ_pos in MixedAgent.MAP_TOPOLOGY.dead_end_zones:
-                #     exit_pos = MixedAgent.MAP_TOPOLOGY.dead_end_zones[succ_pos]
-                #     skip_action = False
-                #     for opp in self.getOpponents(gameState):
-                #         if gameState.getAgentPosition(
-                #             opp
-                #         ) is not None and self.getMazeDistance(succ_pos, exit_pos) >= (
-                #             self.getMazeDistance(
-                #                 exit_pos, gameState.getAgentPosition(opp)
-                #             )
-                #             - 1
-                #         ):
-                #             skip_action = True
-                #     if skip_action:
-                #         continue
+                if succ_pos in MixedAgent.MAP_TOPOLOGY.dead_end_zones:
+                    exit_pos = MixedAgent.MAP_TOPOLOGY.dead_end_zones[succ_pos]
+                    skip_action = False
+                    for opp in self.getOpponents(gameState):
+                        my_advantage = self.get_advantage(exit_pos, gameState, advantages, teammate=self.index)
+                        if my_advantage <= 1:
+                            skip_action = True
+                    if skip_action:
+                        if self.debug:
+                            print(
+                                f"Skipping action {action} for Agent {self.index} (trapped)"
+                            )
+                        continue
 
                 # Skip positions that lose us access to escape points
-                escape_points = self.getEscapePoints()
-                can_escape = False
-                for escape in escape_points:
-                    if (
-                        self.get_advantage(
-                            escape, gameState, advantages, teammate=self.index
-                        )
-                        >= 1
-                    ):
-                        can_escape = True
-                        break
-                if not can_escape:
-                    continue
+                if not target_food_is_capsule:
+                    escape_points = self.getEscapePoints()
+                    can_escape = False
+                    for escape in escape_points:
+                        if (
+                            self.get_advantage(
+                                escape, gameState, advantages, teammate=self.index
+                            )
+                            >= 1
+                        ):
+                            can_escape = True
+                            break
+                    if not can_escape:
+                        if self.debug:
+                            print(
+                                f"Skipping action {action} for Agent {self.index} (lose escape)"
+                            )
+                        continue
 
             valid_moves.append((action, succ_pos))
 
-            positive_count = 0
+            # If we have a priority target food, check if this action gets us closer
+            if target_food is not None:
+                current_dist = self.getMazeDistance(pos, target_food)
+                next_dist = self.getMazeDistance(succ_pos, target_food)
+                if self.debug:
+                    print(
+                        f"Action {action} old dist: {current_dist}, new dist: {next_dist}"
+                    )
+                if next_dist < current_dist:
+                    return [(action, succ_pos)]
 
-            closest_food = float("inf")
-            food_pos = None
+            positive_count = 0
 
             for food in self.getFood():
                 advantage = self.get_advantage(food, gameState, advantages)
                 positive_count += int(advantage > 0)
-                if self.getMazeDistance(food, succ_pos) < closest_food:
-                    closest_food = self.getMazeDistance(food, succ_pos)
-                    food_pos = food
 
             for capsule in self.getCapsules():
                 advantage = self.get_advantage(capsule, gameState, advantages)
                 positive_count += int(advantage > 0) * 40
-                if self.getMazeDistance(capsule, succ_pos) < closest_food:
-                    closest_food = self.getMazeDistance(capsule, succ_pos)
-                    food_pos = capsule
-
-            if food_pos is not None:
-                if self.getMazeDistance(food_pos, succ_pos) < self.getMazeDistance(
-                    food_pos, gameState.getAgentPosition(self.index)
-                ):
-                    return [(action, succ_pos)]
 
             # Check if any enemies are carrying food
             for opp in self.getOpponents(gameState):
@@ -623,7 +625,7 @@ class MixedAgent(CaptureAgent):
 
         if len(best_next) == 0:
             if len(valid_moves) == 0:
-                return [(Directions.STOP, pos)]
+                return [(actions[0][0], pos)]
 
             chosen = random.choice(valid_moves)
             return [chosen]
@@ -659,37 +661,69 @@ class MixedAgent(CaptureAgent):
 
         return [actual_best]
 
+    @profile
     def lowLevelEscape(self, gameState: GameState, actions):
         pos = gameState.getAgentPosition(self.index)
-        max_total_advantage = float("-inf")
-        best_next = [(Directions.STOP, pos)]
+        best_next = (actions[0][0], pos)
 
-        for action in actions:
+        min_escape_dist = min(
+            (
+                self.getMazeDistance(pos, escape)
+                for escape in self.getEscapePoints()
+                if self.get_advantage(
+                    escape, gameState, self.advantages, teammate=self.index
+                )
+                > 1
+            ),
+            default=float("inf"),
+        )
+
+        for action, advantages in actions:
             successor = self.getSuccessor(gameState, action)
-            advantages = self.calculate_advantages(successor)
             succ_pos = successor.getAgentPosition(self.index)
 
+            if self.debug:
+                print(
+                    f"Agent {self.index} is at {succ_pos}, at home: {self.isInHome(succ_pos)}"
+                )
             if self.isInHome(succ_pos):
                 return [(action, succ_pos)]
 
             # Skip positions that lose us access to escape points
             escape_points = self.getEscapePoints()
-            total_advantage = 0
+            escapable_points = []
             positive_count = 0
             for escape in escape_points:
                 advantage = self.get_advantage(
                     escape, gameState, advantages, teammate=self.index
                 )
-                if advantage > 0:
+                if advantage > 1:
                     positive_count += 1
-                total_advantage += advantage
+                    escapable_points.append(escape)
 
-            if total_advantage > max_total_advantage and positive_count > 0:
-                best_next = (action, successor.getAgentPosition(self.index))
-                max_total_advantage = total_advantage
+            if self.debug:
+                print(f"Agent {self.index} has {positive_count} positive escapes")
+            if positive_count > 0:
+                new_min_escape = min(
+                    (
+                        self.getMazeDistance(escape, succ_pos)
+                        for escape in escapable_points
+                    ),
+                    default=float("inf"),
+                )
+                if self.debug:
+                    print(
+                        f"Agent {self.index} was {min_escape_dist} but now {new_min_escape} away"
+                    )
+
+                if new_min_escape < min_escape_dist:
+                    if self.debug:
+                        print(f"Updating best action to {action}")
+                    best_next = (action, successor.getAgentPosition(self.index))
 
         return [best_next]
 
+    @profile
     def lowLevelDefend(self, gameState: GameState, actions):
         pos = gameState.getAgentPosition(self.index)
         max_positive_count = -1
@@ -704,7 +738,13 @@ class MixedAgent(CaptureAgent):
             if gameState.getAgentPosition(i) is not None
         )
 
-        for action in actions:
+        # Cache topology attributes to avoid repeated attribute lookups
+        junctions = MixedAgent.MAP_TOPOLOGY.junctions
+        dead_end_zones = MixedAgent.MAP_TOPOLOGY.dead_end_zones
+        tile_to_corridor = MixedAgent.MAP_TOPOLOGY.tile_to_corridor
+        corridors = MixedAgent.MAP_TOPOLOGY.corridors
+
+        for action, advantages in actions:
             successor = self.getSuccessor(gameState, action)
             def_enemy_pos = tuple(
                 successor.getAgentPosition(i)
@@ -712,7 +752,6 @@ class MixedAgent(CaptureAgent):
                 if successor.getAgentPosition(i) is not None
             )
             next_pos = successor.getAgentPosition(self.index)
-            advantages = self.calculate_advantages(successor)
 
             trapped = all(
                 self.get_advantage(border, successor, advantages, teammate=self.index)
@@ -742,44 +781,25 @@ class MixedAgent(CaptureAgent):
             if self.isInHome(succ_pos):
                 for i in self.getOpponents(gameState):
                     opp_pos = successor.getAgentPosition(i)
-                    if (
-                        isinstance(opp_pos, tuple)
-                        and opp_pos in MixedAgent.MAP_TOPOLOGY.dead_end_zones
-                    ):
-                        exit_pos = MixedAgent.MAP_TOPOLOGY.dead_end_zones[opp_pos]
+                    if isinstance(opp_pos, tuple) and opp_pos in dead_end_zones:
+                        exit_pos = dead_end_zones[opp_pos]
 
                         # We are at the exit already or in a dead end
                         if pos == exit_pos or (
-                            pos in MixedAgent.MAP_TOPOLOGY.dead_end_zones
-                            and MixedAgent.MAP_TOPOLOGY.dead_end_zones[pos] == exit_pos
+                            pos in dead_end_zones and dead_end_zones[pos] == exit_pos
                         ):
                             # If corridor, follow corridor
-                            if opp_pos in MixedAgent.MAP_TOPOLOGY.tile_to_corridor or (
-                                opp_pos in MixedAgent.MAP_TOPOLOGY.junctions
-                                and MixedAgent.MAP_TOPOLOGY.junctions[
-                                    opp_pos
-                                ].junction_type
-                                == "dead_end"
+                            if opp_pos in tile_to_corridor or (
+                                opp_pos in junctions
+                                and junctions[opp_pos].junction_type == "dead_end"
                             ):
-                                if opp_pos in MixedAgent.MAP_TOPOLOGY.junctions:
-                                    target = MixedAgent.MAP_TOPOLOGY.junctions[
-                                        opp_pos
-                                    ].pos
+                                if opp_pos in junctions:
+                                    target = junctions[opp_pos].pos
                                 else:
-                                    corridor_id = (
-                                        MixedAgent.MAP_TOPOLOGY.tile_to_corridor[
-                                            opp_pos
-                                        ]
-                                    )
-                                    corridor = MixedAgent.MAP_TOPOLOGY.corridors[
-                                        corridor_id
-                                    ]
-                                    junction_a = MixedAgent.MAP_TOPOLOGY.junctions[
-                                        corridor.junction_a
-                                    ]
-                                    junction_b = MixedAgent.MAP_TOPOLOGY.junctions[
-                                        corridor.junction_b
-                                    ]
+                                    corridor_id = tile_to_corridor[opp_pos]
+                                    corridor = corridors[corridor_id]
+                                    junction_a = junctions[corridor.junction_a]
+                                    junction_b = junctions[corridor.junction_b]
                                     target = (
                                         junction_a.pos
                                         if junction_a.junction_type == "dead_end"
@@ -852,6 +872,10 @@ class MixedAgent(CaptureAgent):
                     )
                 )
 
+        # Safety check: if no valid moves found, return STOP
+        if len(best_next) == 0:
+            return [(Directions.STOP, pos)]
+
         actual_best = best_next[0]
         width, height = self.walls.width, self.walls.height
         uncertain = lambda x: x < 1 and x > 0.02
@@ -882,6 +906,7 @@ class MixedAgent(CaptureAgent):
 
         return [actual_best]
 
+    @profile
     def getLowLevelPlanHS(
         self, gameState: GameState, highLevelAction: str
     ) -> List[Tuple[str, Tuple]]:
@@ -893,37 +918,79 @@ class MixedAgent(CaptureAgent):
             gameState.getAgentState(self.index).numCarrying
             + gameState.getAgentState((self.index + 2) % 4).numCarrying
         )
+
+        # Find any opponent agents that are carrying and have access to our border
+        for opp in self.getOpponents(gameState):
+            if gameState.getAgentState(opp).numCarrying == 0:
+                continue
+            escape_points = self.getEscapePointsYouAreDefending()
+            trapped = True
+            for escape in escape_points:
+                if self.get_advantage(escape, gameState, self.advantages, enemy=opp) > 1:
+                    trapped = False
+                    break
+
+            if not trapped:
+                total_holding -= gameState.getAgentState(opp).numCarrying
+
         can_win = total_holding + score > 0
+
+        # Check if we have advantage over our capsules
+        capsule_advantage = True
+        for capsule in self.getCapsules():
+            advantage = self.get_advantage(capsule, gameState, self.advantages)
+            if advantage < 0:
+                capsule_advantage = False
+                break
+
 
         legalActions = gameState.getLegalActions(self.index)
         filteredActions = []
         for action in legalActions:
             successor = self.getSuccessor(gameState, action)
+            advantages = self.calculate_advantages(successor)
             succ_pos = successor.getAgentPosition(self.index)
             is_pacman = successor.getAgentState(self.index).isPacman
             is_scared_ghost = (
                 successor.getAgentState(self.index).scaredTimer > 0 and not is_pacman
             )
+
+            # Skip if we die this turn
             if succ_pos == self.startPosition:
                 continue
 
+            # Skip if we are too close to the enemy next turn
             skip_action = False
             for opp in self.getOpponents(gameState):
                 opp_pos = gameState.getAgentPosition(opp)
                 opp_pacman = gameState.getAgentState(opp).isPacman
+                opp_scared_ghost = gameState.getAgentState(opp).scaredTimer > 0
 
                 if (
                     opp_pos is not None
                     and self.getMazeDistance(succ_pos, opp_pos) <= 1
                     and (
                         (opp_pacman and is_scared_ghost)
-                        or (is_pacman and not opp_pacman)
+                        or (is_pacman and not opp_pacman and not opp_scared_ghost)
                     )
                 ):
                     skip_action = True
                     break
-            if not skip_action:
-                filteredActions.append(action)
+            if skip_action:
+                continue
+
+            # Skip if we lose advantage over our capsules
+            new_capsule_advantage = True
+            for capsule in self.getCapsules():
+                advantage = self.get_advantage(capsule, gameState, advantages)
+                if advantage < 0:
+                    new_capsule_advantage = False
+                    break
+
+            if capsule_advantage and not new_capsule_advantage:
+                continue
+
+            filteredActions.append((action, advantages))
 
         if len(filteredActions) == 0:
             return [(Directions.STOP, gameState.getAgentPosition(self.index))]
@@ -933,6 +1000,11 @@ class MixedAgent(CaptureAgent):
 
         elif not winning:
             highLevelAction = "default"
+
+        if self.debug:
+            print(f"Agent {self.index} chose {highLevelAction}")
+            print(f"Legal actions:     {legalActions}")
+            print(f"Potential actions: {[act[0] for act in filteredActions]}")
 
         if highLevelAction == "default":
             return self.lowLevelDefault(gameState, filteredActions)
@@ -954,6 +1026,7 @@ class MixedAgent(CaptureAgent):
         else:
             return successor
 
+    @profile
     def calculate_advantages(self, gameState: GameState, beliefs: dict = None):
         """
         Finds the current advantages at each cell: {(x, y) : (agent_1 dist, agent_2 dist, ...))
@@ -983,8 +1056,12 @@ class MixedAgent(CaptureAgent):
                     advantages[node_pos] = []
                     distance_to_exit = 0
                     if node_pos in MixedAgent.MAP_TOPOLOGY.dead_end_zones:
-                        distance_to_exit = self.getMazeDistance(
-                            node_pos, MixedAgent.MAP_TOPOLOGY.dead_end_zones[node_pos]
+                        distance_to_exit = (
+                            self.getMazeDistance(
+                                node_pos,
+                                MixedAgent.MAP_TOPOLOGY.dead_end_zones[node_pos],
+                            )
+                            + 1
                         )
 
                     for idx in range(4):
@@ -1020,7 +1097,9 @@ class MixedAgent(CaptureAgent):
 
         return advantages
 
-    def get_advantage(self, pos, gameState, advantages, teammate=None, enemy=None):
+    def get_advantage(
+        self, pos, gameState, advantages, teammate=None, enemy=None, max_lookahead=50
+    ):
         if not teammate:
             teammate = self.getTeam(gameState)
         else:
@@ -1030,133 +1109,18 @@ class MixedAgent(CaptureAgent):
         else:
             enemy = (enemy,)
 
-        return min(advantages[pos][op] for op in enemy) - min(
-            advantages[pos][tm] for tm in teammate
-        )
-
-    def _find_junctions_for_items(
-        self, items: List[Tuple[int, int]], topology: MapTopology
-    ) -> Tuple[util.Counter, set]:
-        """
-        Helper method to find all junctions associated with a list of items (food/capsules).
-
-        For each item:
-        - If item is at a junction, add that junction
-        - If item is in a corridor, add the corridor's endpoint junctions (excluding dead-ends)
-
-        Returns:
-            Counter where keys are junction positions and values are the count of items accessible from that junction
-        """
-        junctions_counter = util.Counter()
-        corridors = set()
-
-        for item_pos in items:
-            if item_pos in topology.junctions:
-                # Item is at a junction
-                junctions_counter[item_pos] += 1
-            elif item_pos in topology.tile_to_corridor:
-                # Item is in a corridor - add endpoint junctions
-                corridor = topology.corridors[topology.tile_to_corridor[item_pos]]
-                corridors.add(corridor.corridor_id)
-
-                junction_a = topology.junctions[corridor.junction_a]
-                junction_b = topology.junctions[corridor.junction_b]
-
-                # Only add actual junctions (not dead-ends)
-                if junction_a.junction_type == "junction":
-                    junctions_counter[junction_a.pos] += 1
-                if junction_b.junction_type == "junction":
-                    junctions_counter[junction_b.pos] += 1
-
-        return junctions_counter, corridors
+        op_min_dist = min(advantages[pos][op] for op in enemy)
+        adv = op_min_dist - min(advantages[pos][tm] for tm in teammate)
+        if op_min_dist > max_lookahead:
+            return 1
+        return adv
 
     def update_critical_junctions(self, gameState: GameState):
         """Update cached junction sets for food and capsules when counts change."""
-        RED_FOOD = gameState.getRedFood().asList()
-        RED_CAPSULES = gameState.getRedCapsules()
-        BLUE_FOOD = gameState.getBlueFood().asList()
-        BLUE_CAPSULES = gameState.getBlueCapsules()
-        topology = MixedAgent.MAP_TOPOLOGY
-
-        # Update red food junctions
-        if len(RED_FOOD) != len(MixedAgent.RED_FOOD):
-            MixedAgent.RED_FOOD = RED_FOOD
-            junctions, corridors = self._find_junctions_for_items(RED_FOOD, topology)
-            MixedAgent.RED_FOOD_JUNCTIONS = junctions
-            MixedAgent.RED_FOOD_CORRIDORS = corridors
-
-        # Update red capsule junctions
-        if len(RED_CAPSULES) != len(MixedAgent.RED_CAPSULES):
-            MixedAgent.RED_CAPSULES = RED_CAPSULES
-            junctions, corridors = self._find_junctions_for_items(
-                RED_CAPSULES, topology
-            )
-            MixedAgent.RED_CAPSULE_JUNCTIONS = junctions
-            MixedAgent.RED_CAPSULE_CORRIDORS = corridors
-
-        # Update blue food junctions
-        if len(BLUE_FOOD) != len(MixedAgent.BLUE_FOOD):
-            MixedAgent.BLUE_FOOD = BLUE_FOOD
-            junctions, corridors = self._find_junctions_for_items(BLUE_FOOD, topology)
-            MixedAgent.BLUE_FOOD_JUNCTIONS = junctions
-            MixedAgent.BLUE_FOOD_CORRIDORS = corridors
-
-        # Update blue capsule junctions
-        if len(BLUE_CAPSULES) != len(MixedAgent.BLUE_CAPSULES):
-            MixedAgent.BLUE_CAPSULES = BLUE_CAPSULES
-            junctions, corridors = self._find_junctions_for_items(
-                BLUE_CAPSULES, topology
-            )
-            MixedAgent.BLUE_CAPSULE_JUNCTIONS = junctions
-            MixedAgent.BLUE_CAPSULE_CORRIDORS = corridors
-
-    def getFoodJunctions(self):
-        if self.red:
-            return MixedAgent.BLUE_FOOD_JUNCTIONS
-        else:
-            return MixedAgent.RED_FOOD_JUNCTIONS
-
-    def getCapsuleJunctions(self):
-        if self.red:
-            return MixedAgent.BLUE_CAPSULE_JUNCTIONS
-        else:
-            return MixedAgent.RED_CAPSULE_JUNCTIONS
-
-    def getFoodYouAreDefendingJunctions(self):
-        if self.red:
-            return MixedAgent.RED_FOOD_JUNCTIONS
-        else:
-            return MixedAgent.BLUE_FOOD_JUNCTIONS
-
-    def getCapsuleYouAreDefendingJunctions(self):
-        if self.red:
-            return MixedAgent.RED_CAPSULE_JUNCTIONS
-        else:
-            return MixedAgent.BLUE_CAPSULE_JUNCTIONS
-
-    def getFoodCorridors(self):
-        if self.red:
-            return MixedAgent.BLUE_FOOD_CORRIDORS
-        else:
-            return MixedAgent.RED_FOOD_CORRIDORS
-
-    def getCapsuleCorridors(self):
-        if self.red:
-            return MixedAgent.BLUE_CAPSULE_CORRIDORS
-        else:
-            return MixedAgent.RED_CAPSULE_CORRIDORS
-
-    def getFoodYouAreDefendingCorridors(self):
-        if self.red:
-            return MixedAgent.RED_FOOD_CORRIDORS
-        else:
-            return MixedAgent.BLUE_FOOD_CORRIDORS
-
-    def getCapsuleYouAreDefendingCorridors(self):
-        if self.red:
-            return MixedAgent.RED_CAPSULE_CORRIDORS
-        else:
-            return MixedAgent.BLUE_CAPSULE_CORRIDORS
+        MixedAgent.RED_FOOD = gameState.getRedFood().asList()
+        MixedAgent.RED_CAPSULES = gameState.getRedCapsules()
+        MixedAgent.BLUE_FOOD = gameState.getBlueFood().asList()
+        MixedAgent.BLUE_CAPSULES = gameState.getBlueCapsules()
 
     def getFood(self):
         if self.red:
@@ -1182,33 +1146,32 @@ class MixedAgent(CaptureAgent):
         else:
             return MixedAgent.BLUE_CAPSULES
 
-    def getEscapePoints(self):
+    def initializeEscapePoints(self):
         width, height = self.walls.width, self.walls.height
-        escape_points = []
-        if self.red:
-            x_border = width // 2 - 1
-        else:
-            x_border = width // 2
+        MixedAgent.RED_ESCAPE_POINTS = []
+        MixedAgent.BLUE_ESCAPE_POINTS = []
+
+        red_x_border = width // 2 - 1
+        blue_x_border = width // 2
 
         for y in range(height):
-            if not self.walls[x_border][y]:
-                escape_points.append((x_border, y))
+            if not self.walls[red_x_border][y]:
+                MixedAgent.RED_ESCAPE_POINTS.append((red_x_border, y))
 
-        return escape_points
+            if not self.walls[blue_x_border][y]:
+                MixedAgent.BLUE_ESCAPE_POINTS.append((blue_x_border, y))
+
+    def getEscapePoints(self):
+        if self.red:
+            return MixedAgent.BLUE_ESCAPE_POINTS
+        else:
+            return MixedAgent.RED_ESCAPE_POINTS
 
     def getEscapePointsYouAreDefending(self):
-        width, height = self.walls.width, self.walls.height
-        escape_points = []
         if self.red:
-            x_border = width // 2
+            return MixedAgent.RED_ESCAPE_POINTS
         else:
-            x_border = width // 2 - 1
-
-        for y in range(height):
-            if not self.walls[x_border][y]:
-                escape_points.append((x_border, y))
-
-        return escape_points
+            return MixedAgent.BLUE_ESCAPE_POINTS
 
     def isInEnemyTerritory(self, pos):
         """Check if position is in enemy territory"""
@@ -1696,7 +1659,6 @@ def find_dead_end_zones(
     return dead_end_zones
 
 
-@profile
 def initialize_beliefs(
     game_state: GameState, agents=None
 ) -> Dict[int, List[List[float]]]:
@@ -1732,7 +1694,6 @@ def initialize_beliefs(
     return beliefs
 
 
-@profile
 def update_belief(
     prev_belief: List[List[float]],
     game_state: GameState,
@@ -1843,7 +1804,6 @@ def update_belief(
     return updated_belief
 
 
-@profile
 def update_all_beliefs(
     prev_beliefs: Dict[int, List[List[float]]],
     game_state: GameState,
