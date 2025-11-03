@@ -205,6 +205,7 @@ class MixedAgent(CaptureAgent):
         # Use a dictionary to save information about current agent.
         MixedAgent.CURRENT_ACTION[self.index] = {}
 
+        self.update_critical_junctions(gameState)
         self.initializeEscapePoints()
 
     def final(self, gameState: GameState):
@@ -231,7 +232,10 @@ class MixedAgent(CaptureAgent):
         )
 
         # Update advantages at all junctions
-        MixedAgent.CURRENT_ADVANTAGES = self.calculate_advantages(gameState)
+        self.calculate_advantages(gameState)
+
+        # Find critical attacking and defending junctions
+        self.update_critical_junctions(gameState)
 
         # TODO uncomment
         # -------------High Level Plan Section-------------------
@@ -1002,6 +1006,13 @@ class MixedAgent(CaptureAgent):
         if op_min_dist > max_lookahead:
             return 1
         return adv
+
+    def update_critical_junctions(self, gameState: GameState):
+        """Update cached junction sets for food and capsules when counts change."""
+        MixedAgent.RED_FOOD = gameState.getRedFood().asList()
+        MixedAgent.RED_CAPSULES = gameState.getRedCapsules()
+        MixedAgent.BLUE_FOOD = gameState.getBlueFood().asList()
+        MixedAgent.BLUE_CAPSULES = gameState.getBlueCapsules()
 
     def getFood(self):
         if self.red:
