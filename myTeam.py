@@ -540,9 +540,7 @@ class MixedAgent(CaptureAgent):
                     exit_pos = MixedAgent.MAP_TOPOLOGY.dead_end_zones[succ_pos]
                     skip_action = False
                     for opp in self.getOpponents(gameState):
-                        my_advantage = self.get_advantage(
-                            exit_pos, gameState, advantages, teammate=self.index
-                        )
+                        my_advantage = self.get_advantage(exit_pos, gameState, advantages, teammate=self.index)
                         if my_advantage <= 1:
                             skip_action = True
                     if skip_action:
@@ -945,10 +943,7 @@ class MixedAgent(CaptureAgent):
             escape_points = self.getEscapePointsYouAreDefending()
             trapped = True
             for escape in escape_points:
-                if (
-                    self.get_advantage(escape, gameState, self.advantages, enemy=opp)
-                    > 1
-                ):
+                if self.get_advantage(escape, gameState, self.advantages, enemy=opp) > 1:
                     trapped = False
                     break
 
