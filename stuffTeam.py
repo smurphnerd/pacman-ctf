@@ -205,8 +205,6 @@ class MixedAgent(CaptureAgent):
         # Use a dictionary to save information about current agent.
         MixedAgent.CURRENT_ACTION[self.index] = {}
 
-        self.update_critical_junctions(gameState)
-
         self.initializeEscapePoints()
 
     def final(self, gameState: GameState):
