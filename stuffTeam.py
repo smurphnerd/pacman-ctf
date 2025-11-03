@@ -1029,6 +1029,8 @@ class MixedAgent(CaptureAgent):
 
     def initializeEscapePoints(self):
         width, height = self.walls.width, self.walls.height
+        MixedAgent.RED_ESCAPE_POINTS = []
+        MixedAgent.BLUE_ESCAPE_POINTS = []
 
         red_x_border = width // 2 - 1
         blue_x_border = width // 2
