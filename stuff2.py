@@ -298,10 +298,23 @@ class MixedAgent(CaptureAgent):
                 * 4
                 + 10
             )  # Small buffer
+            time_to_nearest_escape = float("inf")
+            max_escape_advantage = float("-inf")
+            for escape in self.getEscapePoints():
+                escpae_time = self.getMazeDistance(cur_pos, escape) * 4 + 10
+                if escpae_time < time_to_nearest_escape:
+                    time_to_nearest_escape = escpae_time
+
+                advantage = self.get_advantage(
+                    escape, gameState, advantages, teammate=self.index
+                )
+                if advantage > max_escape_advantage:
+                    max_escape_advantage = advantage
 
             score = gameState.getScore()
             score = score if self.red else -score
             winning = True if score > 0 else False
+            losing = True if score < 0 else False
             total_holding = (
                 gameState.getAgentState(self.index).numCarrying
                 + gameState.getAgentState((self.index + 2) % 4).numCarrying
@@ -312,12 +325,18 @@ class MixedAgent(CaptureAgent):
                     continue
                 escape_points = self.getEscapePointsYouAreDefending()
                 trapped = True
+                best_advantage = float("-inf")
                 for escape in escape_points:
-                    if self.get_advantage(escape, gameState, advantages, enemy=opp) < 0:
-                        trapped = False
-                        break
+                    opp_advantage = -1 * self.get_advantage(
+                        escape, gameState, advantages, enemy=opp
+                    )
+                    if opp_advantage > best_advantage:
+                        best_advantage = opp_advantage
 
-                if not trapped:
+                    if opp_advantage > 0:
+                        trapped = False
+
+                if not trapped and best_advantage > max_escape_advantage:
                     total_holding -= gameState.getAgentState(opp).numCarrying
 
             can_win = total_holding + score > (self.small_lead_threshold)
@@ -339,12 +358,13 @@ class MixedAgent(CaptureAgent):
             if im_carrying > 0 and (
                 can_win or gameState.data.timeleft <= time_to_nearest_escape
             ):
-                print(f"Agent {self.index} is carrying {im_carrying}")
                 act = "escape"
-            elif should_attack and not winning:
+            elif (should_attack and not winning) or losing:
                 act = "attack"
             else:
                 act = "defend"
+
+            print(f"Agent {self.index}: {act}")
 
             self.lowLevelPlan = self.getLowLevelPlanHS(gameState, act)
             self.lowLevelActionIndex = 0
@@ -1958,3 +1978,4 @@ def get_path(
     path = [state.state_[0:2] for state in path]
     print(get_path.pac_searcher.get_statistic())
     return path, intercept_t
+
