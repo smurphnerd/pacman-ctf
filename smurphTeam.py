@@ -533,14 +533,8 @@ class MixedAgent(CaptureAgent):
                     exit_pos = MixedAgent.MAP_TOPOLOGY.dead_end_zones[succ_pos]
                     skip_action = False
                     for opp in self.getOpponents(gameState):
-                        if gameState.getAgentPosition(
-                            opp
-                        ) is not None and self.getMazeDistance(succ_pos, exit_pos) >= (
-                            self.getMazeDistance(
-                                exit_pos, gameState.getAgentPosition(opp)
-                            )
-                            - 1
-                        ):
+                        my_advantage = self.get_advantage(exit_pos, gameState, advantages, teammate=self.index)
+                        if my_advantage <= 1:
                             skip_action = True
                     if skip_action:
                         if self.debug:
@@ -924,6 +918,21 @@ class MixedAgent(CaptureAgent):
             gameState.getAgentState(self.index).numCarrying
             + gameState.getAgentState((self.index + 2) % 4).numCarrying
         )
+
+        # Find any opponent agents that are carrying and have access to our border
+        for opp in self.getOpponents(gameState):
+            if gameState.getAgentState(opp).numCarrying == 0:
+                continue
+            escape_points = self.getEscapePointsYouAreDefending()
+            trapped = True
+            for escape in escape_points:
+                if self.get_advantage(escape, gameState, self.advantages, enemy=opp) > 1:
+                    trapped = False
+                    break
+
+            if not trapped:
+                total_holding -= gameState.getAgentState(opp).numCarrying
+
         can_win = total_holding + score > 0
 
         # Check if we have advantage over our capsules
@@ -933,6 +942,7 @@ class MixedAgent(CaptureAgent):
             if advantage < 0:
                 capsule_advantage = False
                 break
+
 
         legalActions = gameState.getLegalActions(self.index)
         filteredActions = []
