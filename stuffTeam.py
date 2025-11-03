@@ -487,7 +487,7 @@ class MixedAgent(CaptureAgent):
                         continue
                     if adv > max_adv:
                         max_adv = adv
-                        best_next.append(action, next_pos)
+                        best_next = [(action, next_pos)]
                 if not best_next:
                     best_next = [die_acts[0]]
 
@@ -676,12 +676,12 @@ class MixedAgent(CaptureAgent):
 
             escape_points = self.getEscapePoints() + self.getCapsules()
 
-            print(gameState.getAgentPosition(self.index))
-            print(
-                [(border, self.get_advantage(
-                    border, gameState, MixedAgent.CURRENT_ADVANTAGES, teammate=self.index
-                ))
-                for border in escape_points])
+            #print(gameState.getAgentPosition(self.index))
+            #print(
+            #    [(border, self.get_advantage(
+            #        border, gameState, MixedAgent.CURRENT_ADVANTAGES, teammate=self.index
+            #    ))
+            #    for border in escape_points])
             legalActions = gameState.getLegalActions(self.index)
             for action in legalActions:
                 successor = self.getSuccessor(gameState, action)
