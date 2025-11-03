@@ -540,7 +540,9 @@ class MixedAgent(CaptureAgent):
                     exit_pos = MixedAgent.MAP_TOPOLOGY.dead_end_zones[succ_pos]
                     skip_action = False
                     for opp in self.getOpponents(gameState):
-                        my_advantage = self.get_advantage(exit_pos, gameState, advantages, teammate=self.index)
+                        my_advantage = self.get_advantage(
+                            exit_pos, gameState, advantages, teammate=self.index
+                        )
                         if my_advantage <= 1:
                             skip_action = True
                     if skip_action:
@@ -943,7 +945,10 @@ class MixedAgent(CaptureAgent):
             escape_points = self.getEscapePointsYouAreDefending()
             trapped = True
             for escape in escape_points:
-                if self.get_advantage(escape, gameState, self.advantages, enemy=opp) > 1:
+                if (
+                    self.get_advantage(escape, gameState, self.advantages, enemy=opp)
+                    > 1
+                ):
                     trapped = False
                     break
 
@@ -959,7 +964,6 @@ class MixedAgent(CaptureAgent):
             if advantage < 0:
                 capsule_advantage = False
                 break
-
 
         legalActions = gameState.getLegalActions(self.index)
         filteredActions = []
@@ -1066,19 +1070,26 @@ class MixedAgent(CaptureAgent):
                     if belief[x][y]:
                         enemy_pos[op].add((x, y))
 
+        tiles = set(
+            self.getFood()
+            + self.getFoodYouAreDefending()
+            + self.getCapsules()
+            + self.getCapsulesYouAreDefending()
+            + self.getEscapePoints()
+            + self.getEscapePointsYouAreDefending()
+            + [gameState.getAgentPosition(self.index)]
+            + list(set(MixedAgent.MAP_TOPOLOGY.dead_end_zones.values()))
+        )
+
         for x in range(width):
             for y in range(height):
                 node_pos = (x, y)
-                if not walls[x][y]:
+                if not walls[x][y] and (x, y) in tiles:
                     advantages[node_pos] = []
                     distance_to_exit = 0
                     if node_pos in MixedAgent.MAP_TOPOLOGY.dead_end_zones:
-                        distance_to_exit = (
-                            self.getMazeDistance(
-                                node_pos,
-                                MixedAgent.MAP_TOPOLOGY.dead_end_zones[node_pos],
-                            )
-                            + 1
+                        distance_to_exit = self.getMazeDistance(
+                            node_pos, MixedAgent.MAP_TOPOLOGY.dead_end_zones[node_pos]
                         )
 
                     for idx in range(4):
@@ -1167,11 +1178,11 @@ class MixedAgent(CaptureAgent):
     def get_advantage(
         self, pos, gameState, advantages, teammate=None, enemy=None, max_lookahead=50
     ):
-        if not teammate:
+        if teammate is None:
             teammate = self.getTeam(gameState)
         else:
             teammate = (teammate,)
-        if not enemy:
+        if enemy is None:
             enemy = self.getOpponents(gameState)
         else:
             enemy = (enemy,)
