@@ -324,7 +324,9 @@ class MixedAgent(CaptureAgent):
             cur_pos = gameState.getAgentPosition(self.index)
             im_carrying = gameState.getAgentState(self.index).numCarrying
             
-            if gameState.getAgentState(self.index).numCarrying > 10:
+            if gameState.getAgentState(self.index).numCarrying > 10 or \
+                (gameState.getAgentState(self.index).numCarrying > 0 and
+                 gameState.data.timeleft <= 150):
                 act = "escape"
             elif any(self.get_advantage(food, gameState, advantages, teammate=self.index) > 2
                    for food in self.getFood()):
