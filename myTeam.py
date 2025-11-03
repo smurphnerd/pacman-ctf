@@ -320,7 +320,7 @@ class MixedAgent(CaptureAgent):
 
         if not self.posSatisfyLowLevelPlan(gameState):
             # TODO just hardcoding defend for now
-            self.lowLevelPlan = self.getLowLevelPlanHS(gameState, "defend")
+            self.lowLevelPlan = self.getLowLevelPlanHS(gameState, "attack")
             self.lowLevelActionIndex = 0
 
         # Safety check in case plan is still empty
@@ -473,7 +473,7 @@ class MixedAgent(CaptureAgent):
             max_positive_count = -1
             max_food_eaten = 0
             next_actions = []
-            def_enemy_pos = tuple(gameState.getAgentPosition(i) 
+            def_enemy_pos = tuple(gameState.getAgentPosition(i)
                                   for i in self.getOpponents(gameState)
                                   if gameState.getAgentPosition(i) is not None)
 
@@ -482,7 +482,7 @@ class MixedAgent(CaptureAgent):
             # we have 4 states: eating (next to food)
             #                   searching (not next to food)
             #                   trapped (no adv on border)
-            # each state has its own tiebreaking 
+            # each state has its own tiebreaking
             # (max food adv, min dist to food, max succ adv)
             eating = False
             for action in legalActions:
@@ -490,16 +490,16 @@ class MixedAgent(CaptureAgent):
                 advantages = self.calculate_advantages(successor)
                 next_pos = successor.getAgentPosition(self.index)
 
-                trapped = all(self.get_advantage(border, successor, advantages, 
+                trapped = all(self.get_advantage(border, successor, advantages,
                                                  teammate=self.index) < 1
                               for border in self.getEscapePoints())
                 trapped = trapped or (min((self.getMazeDistance(next_pos, e_pos)
                                          for e_pos in def_enemy_pos), default=999) <= 1)
-                
+
                 if trapped:
                     trapped_actions.append((action, next_pos, successor, advantages))
                     continue
-                    
+
                 positive_count = 0
                 for food in self.getFood():
                     positive_count += int(self.get_advantage(food, gameState, advantages)
@@ -508,7 +508,7 @@ class MixedAgent(CaptureAgent):
                 if next_pos in self.getFood():
                     eating = True
 
-                next_actions.append((action, next_pos, successor, advantages, 
+                next_actions.append((action, next_pos, successor, advantages,
                                      positive_count, next_pos in self.getFood()))
 
             # Tiebreaking
@@ -516,7 +516,7 @@ class MixedAgent(CaptureAgent):
                 max_adv = -999
                 die_acts = []
                 for action, next_pos, successor, advantages in trapped_actions:
-                    adv = self.get_advantage(next_pos, successor, 
+                    adv = self.get_advantage(next_pos, successor,
                                             advantages, teammate=self.index)
                     if min((self.getMazeDistance(next_pos, e_pos)
                             for e_pos in def_enemy_pos), default=999) <= 1:
@@ -528,7 +528,7 @@ class MixedAgent(CaptureAgent):
                 if max_adv == -999:
                     best_next = [die_acts[0]]
 
-            
+
             elif len(next_actions) > 1:
                 if eating: # eating. try to maximize adv over other foods
                     max_adv = -999
@@ -550,10 +550,10 @@ class MixedAgent(CaptureAgent):
 
             else:
                 best_next = [next_actions[0][:2]]
-            
+
             print(best_next, trapped)
             return best_next
-        
+
 
         elif highLevelAction == "defend":
             best_action, best_next_pos, max_advantage = Directions.STOP, pos, 0.0
@@ -569,18 +569,18 @@ class MixedAgent(CaptureAgent):
             legalActions = gameState.getLegalActions(self.index)
             for action in legalActions:
                 successor = self.getSuccessor(gameState, action)
-                def_enemy_pos = tuple(successor.getAgentPosition(i) 
+                def_enemy_pos = tuple(successor.getAgentPosition(i)
                                     for i in self.getOpponents(successor)
                                     if successor.getAgentPosition(i) is not None)
                 next_pos = successor.getAgentPosition(self.index)
                 advantages = self.calculate_advantages(successor)
 
-                trapped = all(self.get_advantage(border, successor, advantages, 
+                trapped = all(self.get_advantage(border, successor, advantages,
                                                  teammate=self.index) < 2
                               for border in self.getEscapePoints())
                 trapped = trapped or (min((self.getMazeDistance(next_pos, e_pos)
                                          for e_pos in def_enemy_pos), default=999) <= 1)
-                
+
                 if gameState.getAgentState(self.index).isPacman and trapped:
                     continue
 
@@ -665,7 +665,7 @@ class MixedAgent(CaptureAgent):
                                     ]
                 #########
                 #advantages = self.calculate_advantages(successor)
-                
+
                 positive_count = 0
 
                 for food in self.getFoodYouAreDefending():
@@ -676,7 +676,7 @@ class MixedAgent(CaptureAgent):
                 if any(holding > 0 for _, holding in op_holdings):
                     print(op_holdings)
                     for op, holding in op_holdings:
-                        if all(self.get_advantage(border, successor, advantages, 
+                        if all(self.get_advantage(border, successor, advantages,
                                                enemy=op) >= 0
                              for border in self.getEscapePoints()):
                             positive_count += holding
@@ -791,28 +791,35 @@ class MixedAgent(CaptureAgent):
 
                     for idx in range(4):
                         if idx in self.getTeam(gameState):
-                            advantages[node_pos].append(
-                                self.getMazeDistance(
-                                    gameState.getAgentPosition(idx), node_pos
-                                )
-                                + (
-                                    distance_to_exit
-                                    if self.isInEnemyTerritory(node_pos)
-                                    else 0
-                                )
+                            distance = self.getMazeDistance(
+                                gameState.getAgentPosition(idx), node_pos
+                            ) + (
+                                distance_to_exit
+                                if self.isInEnemyTerritory(node_pos)
+                                else 0
                             )
+                            if gameState.getAgentState(
+                                idx
+                            ).scaredTimer > distance and self.isInEnemyTerritory(
+                                node_pos
+                            ):
+                                distance = gameState.getAgentState(idx).scaredTimer
+                            advantages[node_pos].append(distance)
                         else:
                             min_enemy_dist = min(
                                 self.getMazeDistance(pos, node_pos)
                                 for pos in enemy_pos[idx]
                             )
-                            advantages[node_pos].append(
-                                min_enemy_dist
-                                + (distance_to_exit if self.isInHome(node_pos) else 0)
+                            distance = min_enemy_dist + (
+                                distance_to_exit if self.isInHome(node_pos) else 0
                             )
+                            if gameState.getAgentState(idx).scaredTimer > distance and self.isInHome(node_pos):
+                                distance = gameState.getAgentState(idx).scaredTimer
+
+                            advantages[node_pos].append(distance)
 
         return advantages
-    
+
     def get_advantage(self, pos, gameState, advantages, teammate=None, enemy=None,
                       max_lookahead=50):
         if not teammate:
@@ -823,8 +830,8 @@ class MixedAgent(CaptureAgent):
             enemy = self.getOpponents(gameState)
         else:
             enemy = (enemy,)
-        
-        op_min_dist = min(advantages[pos][op] for op in enemy) 
+
+        op_min_dist = min(advantages[pos][op] for op in enemy)
         adv = op_min_dist - min(advantages[pos][tm] for tm in teammate)
         if op_min_dist > max_lookahead:
             return 1
