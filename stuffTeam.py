@@ -286,11 +286,11 @@ class MixedAgent(CaptureAgent):
             advantages = MixedAgent.CURRENT_ADVANTAGES
             cur_pos = gameState.getAgentPosition(self.index)
             im_carrying = gameState.getAgentState(self.index).numCarrying
-
-            if gameState.getAgentState(self.index).numCarrying > 30 or (
-                gameState.getAgentState(self.index).numCarrying > 0
-                and gameState.data.timeleft <= 150
-            ):
+            food_to_win = len(self.getFood()) <= 2
+            if im_carrying > 30 or (
+                im_carrying > 0 and gameState.data.timeleft <= 220) or (
+                im_carrying > 0 and food_to_win
+                ):
                 act = "escape"
             elif any(
                 self.get_advantage(food, gameState, advantages, teammate=self.index) > 2
@@ -608,10 +608,12 @@ class MixedAgent(CaptureAgent):
                             ),
                             default=999,
                         )
-                        <= 1
+                        <= 1 or self.getMazeDistance(gameState.getAgentPosition(self.index),
+                                                    next_pos) > 1
                     ):
                         die_acts.append((action, next_pos))
                         continue
+
                     if adv > max_adv:
                         max_adv = adv
                         best_next = [(action, next_pos)]
@@ -661,6 +663,7 @@ class MixedAgent(CaptureAgent):
             best_action, best_next_pos, max_advantage = Directions.STOP, pos, 0.0
             max_positive_count = -1
             best_next = []
+            trapped_actions = []
             op_holdings = tuple(
                 (idx, gameState.getAgentState(idx).numCarrying)
                 for idx in self.getOpponents(gameState)
@@ -671,6 +674,14 @@ class MixedAgent(CaptureAgent):
                 if gameState.getAgentPosition(i) is not None
             )
 
+            escape_points = self.getEscapePoints() + self.getCapsules()
+
+            #print(gameState.getAgentPosition(self.index))
+            #print(
+            #    [(border, self.get_advantage(
+            #        border, gameState, MixedAgent.CURRENT_ADVANTAGES, teammate=self.index
+            #    ))
+            #    for border in escape_points])
             legalActions = gameState.getLegalActions(self.index)
             for action in legalActions:
                 successor = self.getSuccessor(gameState, action)
@@ -683,7 +694,6 @@ class MixedAgent(CaptureAgent):
                 advantages = self.calculate_advantages(successor)
 
                 escape_points = self.getEscapePoints() + self.getCapsules()
-
                 trapped = all(
                     self.get_advantage(
                         border, successor, advantages, teammate=self.index
@@ -708,8 +718,18 @@ class MixedAgent(CaptureAgent):
                     for i in self.getOpponents(gameState)
                 )
 
+                min_enemy_adv = -999
+                for food in self.getFood():
+                    min_enemy_adv = max(
+                        min_enemy_adv,
+                        self.get_advantage(
+                            food, gameState, advantages, teammate=self.index
+                        ),
+                    )
+
                 trapped = trapped or threatened
                 if successor.getAgentState(self.index).isPacman and trapped:
+                    trapped_actions.append((action, next_pos, min_enemy_adv))
                     continue
 
                 succ_pos = successor.getAgentPosition(self.index)
@@ -800,10 +820,8 @@ class MixedAgent(CaptureAgent):
                                         )
                                     ]
                 #########
-                # advantages = self.calculate_advantages(successor)
 
                 positive_count = 0
-                min_enemy_adv = -999
 
                 for food in self.getFoodYouAreDefending():
                     positive_count += int(
@@ -845,7 +863,12 @@ class MixedAgent(CaptureAgent):
                     best_next.append(
                         (action, successor.getAgentPosition(self.index), min_enemy_adv)
                     )
-
+                
+            if not best_next:
+                best_next = trapped_actions
+                #print(trapped_actions)
+                #print("trapped")
+                #exit()
             actual_best = best_next[0]
 
             width, height = self.walls.width, self.walls.height
@@ -1077,7 +1100,7 @@ class MixedAgent(CaptureAgent):
     def isInHome(self, pos):
         """Check if position is in home territory"""
         return not self.isInEnemyTerritory(pos)
-
+    
 
 # ==================== Topological Map Preprocessing ====================
 
