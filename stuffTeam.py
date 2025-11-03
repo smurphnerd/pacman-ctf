@@ -232,7 +232,7 @@ class MixedAgent(CaptureAgent):
         )
 
         # Update advantages at all junctions
-        self.calculate_advantages(gameState)
+        MixedAgent.CURRENT_ADVANTAGES = self.calculate_advantages(gameState)
 
         # Find critical attacking and defending junctions
         self.update_critical_junctions(gameState)
@@ -287,7 +287,7 @@ class MixedAgent(CaptureAgent):
             cur_pos = gameState.getAgentPosition(self.index)
             im_carrying = gameState.getAgentState(self.index).numCarrying
 
-            if gameState.getAgentState(self.index).numCarrying > 10 or (
+            if gameState.getAgentState(self.index).numCarrying > 30 or (
                 gameState.getAgentState(self.index).numCarrying > 0
                 and gameState.data.timeleft <= 150
             ):
@@ -299,7 +299,6 @@ class MixedAgent(CaptureAgent):
                 act = "attack"
             else:
                 act = "defend"
-
             self.lowLevelPlan = self.getLowLevelPlanHS(gameState, act)
             self.lowLevelActionIndex = 0
 
