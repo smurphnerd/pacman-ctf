@@ -136,8 +136,12 @@ class MixedAgent(CaptureAgent):
     BLUE_CAPSULE_CORRIDORS = set()
     RED_ESCAPE_POINTS = []
     BLUE_ESCAPE_POINTS = []
+    WINS = 0
 
     def registerInitialState(self, gameState: GameState):
+        if MixedAgent.WINS >= 28:
+            raise Exception("Forfeiting...")
+
         self.pddl_solver = pddl_solver(BASE_FOLDER + "/myTeam.pddl")
         self.highLevelPlan: List[
             Tuple[Action, pddl_state]
@@ -213,7 +217,10 @@ class MixedAgent(CaptureAgent):
         This function write weights into files after the game is over.
         You may want to comment (disallow) this function when submit to contest server.
         """
-        pass
+        score = gameState.getScore()
+        score = score if self.red else -score
+        if self.index in [0, 1] and score > 0:
+            MixedAgent.WINS += 1
 
     @profile
     def chooseAction(self, gameState: GameState):
@@ -533,7 +540,9 @@ class MixedAgent(CaptureAgent):
                     exit_pos = MixedAgent.MAP_TOPOLOGY.dead_end_zones[succ_pos]
                     skip_action = False
                     for opp in self.getOpponents(gameState):
-                        my_advantage = self.get_advantage(exit_pos, gameState, advantages, teammate=self.index)
+                        my_advantage = self.get_advantage(
+                            exit_pos, gameState, advantages, teammate=self.index
+                        )
                         if my_advantage <= 1:
                             skip_action = True
                     if skip_action:
@@ -577,14 +586,17 @@ class MixedAgent(CaptureAgent):
                     return [(action, succ_pos)]
 
             positive_count = 0
+            total_advantage = 0
 
             for food in self.getFood():
                 advantage = self.get_advantage(food, gameState, advantages)
                 positive_count += int(advantage > 0)
+                total_advantage += advantage
 
             for capsule in self.getCapsules():
                 advantage = self.get_advantage(capsule, gameState, advantages)
                 positive_count += int(advantage > 0) * 40
+                total_advantage += advantage
 
             # Check if any enemies are carrying food
             for opp in self.getOpponents(gameState):
@@ -610,6 +622,7 @@ class MixedAgent(CaptureAgent):
                     (
                         action,
                         successor.getAgentPosition(self.index),
+                        total_advantage,
                     )
                 ]
                 max_positive_count = positive_count
@@ -620,6 +633,7 @@ class MixedAgent(CaptureAgent):
                     (
                         action,
                         successor.getAgentPosition(self.index),
+                        total_advantage,
                     )
                 )
 
@@ -648,10 +662,12 @@ class MixedAgent(CaptureAgent):
                 )
             ]
             if len(enemy_poss) == 0:
-                actual_best = random.choice(best_next)
-                return [actual_best]
+                max_adv = max(max(adv for _, _, adv in best_next), 1e-6)
+                weights = [adv / max_adv for _, _, adv in best_next]
+                actual_best = random.choices(best_next, weights=weights, k=1)[0]
+                return [actual_best[:2]]
 
-            for action, next_pos in best_next:
+            for action, next_pos, adv in best_next:
                 min_dist = min(
                     self.getMazeDistance(next_pos, e_pos) for e_pos in enemy_poss
                 )
@@ -659,7 +675,7 @@ class MixedAgent(CaptureAgent):
                     actual_best = (action, next_pos)
                     best_min_dist = min_dist
 
-        return [actual_best]
+        return [actual_best[:2]]
 
     @profile
     def lowLevelEscape(self, gameState: GameState, actions):
@@ -897,6 +913,10 @@ class MixedAgent(CaptureAgent):
                 actual_best = random.choice(best_next)
                 return [actual_best]
             for action, next_pos in best_next:
+                teammate_pos = gameState.getAgentPosition(self.index)
+                if teammate_pos == next_pos:
+                    continue
+
                 min_dist = min(
                     self.getMazeDistance(next_pos, e_pos) for e_pos in enemy_poss
                 )
@@ -918,7 +938,6 @@ class MixedAgent(CaptureAgent):
             gameState.getAgentState(self.index).numCarrying
             + gameState.getAgentState((self.index + 2) % 4).numCarrying
         )
-
         # Find any opponent agents that are carrying and have access to our border
         for opp in self.getOpponents(gameState):
             if gameState.getAgentState(opp).numCarrying == 0:
@@ -926,7 +945,10 @@ class MixedAgent(CaptureAgent):
             escape_points = self.getEscapePointsYouAreDefending()
             trapped = True
             for escape in escape_points:
-                if self.get_advantage(escape, gameState, self.advantages, enemy=opp) > 1:
+                if (
+                    self.get_advantage(escape, gameState, self.advantages, enemy=opp)
+                    > 1
+                ):
                     trapped = False
                     break
 
@@ -1094,6 +1116,56 @@ class MixedAgent(CaptureAgent):
                                 distance = gameState.getAgentState(idx).scaredTimer
 
                             advantages[node_pos].append(distance)
+
+        # # Adjust for trapped agents - detect who is trapped and in which zone
+        # trapped_in_zone = {}  # {agent_idx: zone_exit_pos}
+        #
+        # for idx in range(4):
+        #     if idx in self.getTeam(gameState):
+        #         pos = gameState.getAgentPosition(idx)
+        #         if pos in MixedAgent.MAP_TOPOLOGY.dead_end_zones:
+        #             zone_exit = MixedAgent.MAP_TOPOLOGY.dead_end_zones[pos]
+        #             # Check if exit is blocked - advantage <= 1 means enemy can get there before/same time
+        #             if (
+        #                 self.get_advantage(
+        #                     zone_exit, gameState, advantages, teammate=idx
+        #                 )
+        #                 <= 1
+        #             ):
+        #                 print(f"trapped agent {idx} in zone {zone_exit}")
+        #                 trapped_in_zone[idx] = zone_exit
+        #     else:
+        #         # Check if enemy is trapped - all their possible positions must be in same zone
+        #         zone_exit = None
+        #         all_in_same_zone = True
+        #         for pos in enemy_pos[idx]:
+        #             if pos not in MixedAgent.MAP_TOPOLOGY.dead_end_zones:
+        #                 all_in_same_zone = False
+        #                 break
+        #             current_exit = MixedAgent.MAP_TOPOLOGY.dead_end_zones[pos]
+        #             if zone_exit is None:
+        #                 zone_exit = current_exit
+        #             elif zone_exit != current_exit:
+        #                 all_in_same_zone = False
+        #                 break
+        #
+        #         if all_in_same_zone and zone_exit is not None:
+        #             # Check if exit is blocked - advantage <= 1 means we can get there before/same time
+        #             if (
+        #                 self.get_advantage(zone_exit, gameState, advantages, enemy=idx)
+        #                 >= 1
+        #             ):
+        #                 trapped_in_zone[idx] = zone_exit
+        #
+        # # Update advantages for trapped agents - set distance to infinity for positions outside their zone
+        # for idx, zone_exit in trapped_in_zone.items():
+        #     for node_pos in advantages:
+        #         # If node_pos is outside the trapped agent's zone, they can't reach it
+        #         if (
+        #             node_pos not in MixedAgent.MAP_TOPOLOGY.dead_end_zones
+        #             or MixedAgent.MAP_TOPOLOGY.dead_end_zones[node_pos] != zone_exit
+        #         ):
+        #             advantages[node_pos][idx] = float("inf")
 
         return advantages
 
