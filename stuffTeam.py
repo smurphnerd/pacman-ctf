@@ -207,6 +207,8 @@ class MixedAgent(CaptureAgent):
 
         self.update_critical_junctions(gameState)
 
+        self.initializeEscapePoints()
+
     def final(self, gameState: GameState):
         """
         This function write weights into files after the game is over.
@@ -986,6 +988,7 @@ class MixedAgent(CaptureAgent):
         else:
             return successor
 
+    @profile
     def calculate_advantages(self, gameState: GameState, beliefs: dict = None):
         """
         Finds the current advantages at each cell: {(x, y) : (agent_1 dist, agent_2 dist, ...))
