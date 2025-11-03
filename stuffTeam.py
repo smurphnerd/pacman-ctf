@@ -280,7 +280,6 @@ class MixedAgent(CaptureAgent):
         # -------------Low Level Plan Section-------------------
         # Get the low level plan using Q learning, and return a low level action at last.
         # A low level action is defined in Directions, whihc include {"North", "South", "East", "West", "Stop"}
-
         if not self.posSatisfyLowLevelPlan(gameState):
             # TODO just hardcoding defend for now
             advantages = MixedAgent.CURRENT_ADVANTAGES
@@ -960,10 +959,14 @@ class MixedAgent(CaptureAgent):
                     if belief[x][y]:
                         enemy_pos[op].add((x, y))
 
+
+        tiles = set(self.getFood() + self.getFoodYouAreDefending() + self.getCapsules() + \
+            self.getCapsulesYouAreDefending() + self.getEscapePoints() + self.getEscapePointsYouAreDefending())
+        
         for x in range(width):
             for y in range(height):
                 node_pos = (x, y)
-                if not walls[x][y]:
+                if not walls[x][y] and (x, y) in tiles:
                     advantages[node_pos] = []
                     distance_to_exit = 0
                     if node_pos in MixedAgent.MAP_TOPOLOGY.dead_end_zones:
