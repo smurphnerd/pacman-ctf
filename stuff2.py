@@ -339,7 +339,7 @@ class MixedAgent(CaptureAgent):
                 if not trapped and best_advantage > max_escape_advantage:
                     total_holding -= gameState.getAgentState(opp).numCarrying
 
-            can_win = total_holding + score > (self.small_lead_threshold)
+            can_win = total_holding + score > self.small_lead_threshold
 
             im_carrying = gameState.getAgentState(self.index).numCarrying
 
@@ -475,6 +475,11 @@ class MixedAgent(CaptureAgent):
         self, gameState: GameState, highLevelAction: str
     ) -> List[Tuple[str, Tuple]]:
         pos = gameState.getAgentPosition(self.index)
+
+        dead_end_zones = MixedAgent.MAP_TOPOLOGY.dead_end_zones
+        junctions = MixedAgent.MAP_TOPOLOGY.junctions
+        corridors = MixedAgent.MAP_TOPOLOGY.corridors
+        tile_to_corridor = MixedAgent.MAP_TOPOLOGY.tile_to_corridor
 
         if highLevelAction == "escape":
             best_action, best_next_pos, max_advantage = Directions.STOP, pos, 0.0
@@ -818,48 +823,26 @@ class MixedAgent(CaptureAgent):
                 if self.isInHome(succ_pos):
                     for i in self.getOpponents(gameState):
                         opp_pos = successor.getAgentPosition(i)
-                        if (
-                            isinstance(opp_pos, tuple)
-                            and opp_pos in MixedAgent.MAP_TOPOLOGY.dead_end_zones
-                        ):
-                            exit_pos = MixedAgent.MAP_TOPOLOGY.dead_end_zones[opp_pos]
+                        if isinstance(opp_pos, tuple) and opp_pos in dead_end_zones:
+                            exit_pos = dead_end_zones[opp_pos]
 
                             # We are at the exit already or in a dead end
                             if pos == exit_pos or (
-                                pos in MixedAgent.MAP_TOPOLOGY.dead_end_zones
-                                and MixedAgent.MAP_TOPOLOGY.dead_end_zones[pos]
-                                == exit_pos
+                                pos in dead_end_zones
+                                and dead_end_zones[pos] == exit_pos
                             ):
                                 # If corridor, follow corridor
-                                if (
-                                    opp_pos in MixedAgent.MAP_TOPOLOGY.tile_to_corridor
-                                    or (
-                                        opp_pos in MixedAgent.MAP_TOPOLOGY.junctions
-                                        and MixedAgent.MAP_TOPOLOGY.junctions[
-                                            opp_pos
-                                        ].junction_type
-                                        == "dead_end"
-                                    )
+                                if opp_pos in tile_to_corridor or (
+                                    opp_pos in junctions
+                                    and junctions[opp_pos].junction_type == "dead_end"
                                 ):
-                                    if opp_pos in MixedAgent.MAP_TOPOLOGY.junctions:
-                                        target = MixedAgent.MAP_TOPOLOGY.junctions[
-                                            opp_pos
-                                        ].pos
+                                    if opp_pos in junctions:
+                                        target = junctions[opp_pos].pos
                                     else:
-                                        corridor_id = (
-                                            MixedAgent.MAP_TOPOLOGY.tile_to_corridor[
-                                                opp_pos
-                                            ]
-                                        )
-                                        corridor = MixedAgent.MAP_TOPOLOGY.corridors[
-                                            corridor_id
-                                        ]
-                                        junction_a = MixedAgent.MAP_TOPOLOGY.junctions[
-                                            corridor.junction_a
-                                        ]
-                                        junction_b = MixedAgent.MAP_TOPOLOGY.junctions[
-                                            corridor.junction_b
-                                        ]
+                                        corridor_id = tile_to_corridor[opp_pos]
+                                        corridor = corridors[corridor_id]
+                                        junction_a = junctions[corridor.junction_a]
+                                        junction_b = junctions[corridor.junction_b]
                                         target = (
                                             junction_a.pos
                                             if junction_a.junction_type == "dead_end"
@@ -907,14 +890,6 @@ class MixedAgent(CaptureAgent):
                         int(self.get_advantage(capsule, gameState, advantages) >= 0)
                         * len(self.getFood())
                         // 2
-                    )
-
-                for food in self.getFood():
-                    min_enemy_adv = max(
-                        min_enemy_adv,
-                        self.get_advantage(
-                            food, gameState, advantages, teammate=self.index
-                        ),
                     )
 
                 # we need to consider guarding the border when enemy is holding
@@ -1978,4 +1953,3 @@ def get_path(
     path = [state.state_[0:2] for state in path]
     print(get_path.pac_searcher.get_statistic())
     return path, intercept_t
-

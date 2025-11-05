@@ -220,7 +220,7 @@ class MixedAgent(CaptureAgent):
         self.defensiveDistancer = self.createDefensiveDistancer(gameState)
         self.defensiveDistancer.getMazeDistances()
 
-        self.debug = True
+        self.debug = False
 
         # Calculate total starting food and thresholds (once per game)
         red_food = gameState.getRedFood().count()
