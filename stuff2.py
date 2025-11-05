@@ -501,7 +501,7 @@ class MixedAgent(CaptureAgent):
                 advantages = self.calculate_advantages(successor)
                 next_pos = successor.getAgentPosition(self.index)
 
-                if self.isInHome(next_pos):
+                if self.isInHome(next_pos) and self.getMazeDistance(pos, next_pos) <= 1:
                     return [(action, next_pos)]
 
                 trapped = all(
