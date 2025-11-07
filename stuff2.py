@@ -119,9 +119,7 @@ class MixedAgent(CaptureAgent):
     ESTIMATED_POSITIONS = {}  # Cache for estimated enemy positions using beliefs
     MAP_TOPOLOGY: MapTopology = None  # Cached topological map analysis
     CURRENT_ADVANTAGES = {}  # Cache for current distance advantage on junctions
-    CURRENT_LAYOUT_STR = (
-        None  # String representation of current layout for cache invalidation
-    )
+    MAP_TOPOLOGIES = {}
     RED_FOOD = []
     RED_CAPSULES = []
     BLUE_FOOD = []
@@ -139,13 +137,14 @@ class MixedAgent(CaptureAgent):
     CACHED_ADVANTAGES = {}
     GAMES_PLAYED = 0
 
+    @profile
     def registerInitialState(self, gameState: GameState):
         self.startPosition = gameState.getAgentPosition(
             self.index
         )  # the start location of the agent
         CaptureAgent.registerInitialState(self, gameState)
 
-        self.debug = True
+        self.debug = False
 
         # Calculate total starting food and thresholds (once per game)
         red_food = gameState.getRedFood().count()
@@ -179,14 +178,15 @@ class MixedAgent(CaptureAgent):
 
         self.walls = gameState.getWalls()
 
-        if MixedAgent.CURRENT_LAYOUT_STR != layout_str:
-            # New layout detected - rebuild topology
-            MixedAgent.MAP_TOPOLOGY = build_map_topology(self.walls)
-            MixedAgent.CURRENT_LAYOUT_STR = layout_str
+        if layout_str not in MixedAgent.MAP_TOPOLOGIES:
+            MixedAgent.MAP_TOPOLOGIES[layout_str] = build_map_topology(self.walls)
 
             if self.debug:
                 print(f"\nAgent {self.index}: Built map topology for new layout")
                 visualize_topology(MixedAgent.MAP_TOPOLOGY, self.walls)
+
+        MixedAgent.MAP_TOPOLOGY = MixedAgent.MAP_TOPOLOGIES[layout_str]
+
 
         self.update_critical_junctions(gameState)
 
