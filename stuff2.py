@@ -136,29 +136,14 @@ class MixedAgent(CaptureAgent):
     BLUE_CAPSULE_CORRIDORS = set()
     RED_ESCAPE_POINTS = []
     BLUE_ESCAPE_POINTS = []
-    WINS = 0
+    CACHED_ADVANTAGES = {}
+    GAMES_PLAYED = 0
 
     def registerInitialState(self, gameState: GameState):
-        if MixedAgent.WINS >= 28:
-            raise Exception("Forfeiting...")
-
-        self.pddl_solver = pddl_solver(BASE_FOLDER + "/myTeam.pddl")
-        self.highLevelPlan: List[
-            Tuple[Action, pddl_state]
-        ] = None  # Plan is a list Action and pddl_state
-        self.currentNegativeGoalStates = []
-        self.currentPositiveGoalStates = []
-        self.currentActionIndex = (
-            0  # index of action in self.highLevelPlan should be execute next
-        )
-
         self.startPosition = gameState.getAgentPosition(
             self.index
         )  # the start location of the agent
         CaptureAgent.registerInitialState(self, gameState)
-
-        self.lowLevelPlan: List[Tuple[str, Tuple]] = []
-        self.lowLevelActionIndex = 0
 
         self.debug = True
 
@@ -203,13 +188,11 @@ class MixedAgent(CaptureAgent):
                 print(f"\nAgent {self.index}: Built map topology for new layout")
                 visualize_topology(MixedAgent.MAP_TOPOLOGY, self.walls)
 
-        # Initialize values for distance advantage at all junctions
-        MixedAgent.CURRENT_ADVANTAGES = self.calculate_advantages(gameState)
+        self.update_critical_junctions(gameState)
 
         # Use a dictionary to save information about current agent.
         MixedAgent.CURRENT_ACTION[self.index] = {}
 
-        self.update_critical_junctions(gameState)
         self.initializeEscapePoints()
 
     def final(self, gameState: GameState):
@@ -217,10 +200,12 @@ class MixedAgent(CaptureAgent):
         This function write weights into files after the game is over.
         You may want to comment (disallow) this function when submit to contest server.
         """
-        score = gameState.getScore()
-        score = score if self.red else -score
-        if self.index in [0, 1] and score > 0:
-            MixedAgent.WINS += 1
+        if self.index in [0, 1]:
+            MixedAgent.GAMES_PLAYED += 1
+
+        if MixedAgent.GAMES_PLAYED % 49 == 0:
+            MixedAgent.CACHED_ADVANTAGES = {}
+
 
     @profile
     def chooseAction(self, gameState: GameState):
@@ -244,128 +229,87 @@ class MixedAgent(CaptureAgent):
         # Update advantages at all junctions
         MixedAgent.CURRENT_ADVANTAGES = self.calculate_advantages(gameState)
 
-        # TODO uncomment
-        # -------------High Level Plan Section-------------------
-        # Get high level action from a pddl plan.
-
-        # Collect objects and init states from gameState
-        # objects, initState = self.get_pddl_state(gameState)
-        # positiveGoal, negtiveGoal = self.getGoals(objects, initState)
-        #
-        # # Check if we can stick to current plan
-        # if not self.stateSatisfyCurrentPlan(initState, positiveGoal, negtiveGoal):
-        #     # Cannot stick to current plan, prepare goals and replan
-        #     if self.debug:
-        #         print(f"Agent {self.index} replanning:")
-        #         print(f"  Positive Goal: {positiveGoal}")
-        #         print(f"  Negative Goal: {negtiveGoal}")
-        #     self.highLevelPlan: List[Tuple[Action, pddl_state]] = self.getHighLevelPlan(
-        #         objects, initState, positiveGoal, negtiveGoal
-        #     )  # Plan is a list Action and pddl_state
-        #     self.currentActionIndex = 0
-        #     self.lowLevelPlan = []  # reset low level plan
-        #     self.currentNegativeGoalStates = negtiveGoal
-        #     self.currentPositiveGoalStates = positiveGoal
-        #     if self.debug:
-        #         print(f"  Plan: {[action.name for action, _ in self.highLevelPlan]}")
-        #
-        # if not self.highLevelPlan:
-        #     if self.debug:
-        #         print(f"No plan found for predicates: {initState}")
-        #     highLevelAction = Action("default_defend", None, [], [], [], [])
-        # else:
-        #     # Get next action from the plan
-        #     highLevelAction = self.highLevelPlan[self.currentActionIndex][0]
-        # MixedAgent.CURRENT_ACTION[self.index] = highLevelAction
-        #
-        # if self.debug:
-        #     print(f"Agent {self.index}: High-Level Action = {highLevelAction.name}")
-        #
-        # if highLevelAction.name != "default_defend":
-        #     MixedAgent.DEFENSIVE_ASSIGNMENTS[self.index] = -1
-
         # -------------Low Level Plan Section-------------------
         # Get the low level plan using Q learning, and return a low level action at last.
         # A low level action is defined in Directions, whihc include {"North", "South", "East", "West", "Stop"}
-        if not self.posSatisfyLowLevelPlan(gameState):
-            advantages = MixedAgent.CURRENT_ADVANTAGES
-            cur_pos = gameState.getAgentPosition(self.index)
-            time_to_nearest_escape = (
-                min(
-                    self.getMazeDistance(cur_pos, escape)
-                    for escape in self.getEscapePoints()
-                )
-                * 4
-                + 10
-            )  # Small buffer
-            time_to_nearest_escape = float("inf")
-            max_escape_advantage = float("-inf")
-            for escape in self.getEscapePoints():
-                escpae_time = self.getMazeDistance(cur_pos, escape) * 4 + 10
-                if escpae_time < time_to_nearest_escape:
-                    time_to_nearest_escape = escpae_time
-
-                advantage = self.get_advantage(
-                    escape, gameState, advantages, teammate=self.index
-                )
-                if advantage > max_escape_advantage:
-                    max_escape_advantage = advantage
-
-            score = gameState.getScore()
-            score = score if self.red else -score
-            winning = True if score > 0 else False
-            losing = True if score < 0 else False
-            total_holding = (
-                gameState.getAgentState(self.index).numCarrying
-                + gameState.getAgentState((self.index + 2) % 4).numCarrying
+        advantages = MixedAgent.CURRENT_ADVANTAGES
+        cur_pos = gameState.getAgentPosition(self.index)
+        time_to_nearest_escape = (
+            min(
+                self.getMazeDistance(cur_pos, escape)
+                for escape in self.getEscapePoints()
             )
-            # Find any opponent agents that are carrying and have access to our border
-            for opp in self.getOpponents(gameState):
-                if gameState.getAgentState(opp).numCarrying == 0:
-                    continue
-                escape_points = self.getEscapePointsYouAreDefending()
-                trapped = True
-                best_advantage = float("-inf")
-                for escape in escape_points:
-                    opp_advantage = -1 * self.get_advantage(
-                        escape, gameState, advantages, enemy=opp
-                    )
-                    if opp_advantage > best_advantage:
-                        best_advantage = opp_advantage
+            * 4
+            + 10
+        )  # Small buffer
+        time_to_nearest_escape = float("inf")
+        max_escape_advantage = float("-inf")
+        for escape in self.getEscapePoints():
+            escpae_time = self.getMazeDistance(cur_pos, escape) * 4 + 10
+            if escpae_time < time_to_nearest_escape:
+                time_to_nearest_escape = escpae_time
 
-                    if opp_advantage > 0:
-                        trapped = False
+            advantage = self.get_advantage(
+                escape, gameState, advantages, teammate=self.index
+            )
+            if advantage > max_escape_advantage:
+                max_escape_advantage = advantage
 
-                if not trapped and best_advantage > max_escape_advantage:
-                    total_holding -= gameState.getAgentState(opp).numCarrying
-
-            can_win = total_holding + score > self.small_lead_threshold
-
-            im_carrying = gameState.getAgentState(self.index).numCarrying
-
-            should_attack = False
-            for food in self.getFood():
-                advantage = self.get_advantage(
-                    food, gameState, advantages, teammate=self.index
+        score = gameState.getScore()
+        score = score if self.red else -score
+        winning = True if score > 0 else False
+        losing = True if score < 0 else False
+        total_holding = (
+            gameState.getAgentState(self.index).numCarrying
+            + gameState.getAgentState((self.index + 2) % 4).numCarrying
+        )
+        # Find any opponent agents that are carrying and have access to our border
+        for opp in self.getOpponents(gameState):
+            if gameState.getAgentState(opp).numCarrying == 0:
+                continue
+            escape_points = self.getEscapePointsYouAreDefending()
+            trapped = True
+            best_advantage = float("-inf")
+            for escape in escape_points:
+                opp_advantage = -1 * self.get_advantage(
+                    escape, gameState, advantages, enemy=opp
                 )
-                teammate_advantage = self.get_advantage(
-                    food, gameState, advantages, teammate=(self.index + 2) % 4
-                )
-                if advantage > 1 and advantage > teammate_advantage:
-                    should_attack = True
-                    break
+                if opp_advantage > best_advantage:
+                    best_advantage = opp_advantage
 
-            if im_carrying > 0 and (
-                can_win or gameState.data.timeleft <= time_to_nearest_escape
-            ):
-                act = "escape"
-            elif (should_attack and not winning) or losing:
-                act = "attack"
-            else:
-                act = "defend"
+                if opp_advantage > 0:
+                    trapped = False
 
-            self.lowLevelPlan = self.getLowLevelPlanHS(gameState, act)
-            self.lowLevelActionIndex = 0
+            if not trapped and best_advantage > max_escape_advantage:
+                total_holding -= gameState.getAgentState(opp).numCarrying
+
+        can_win = total_holding + score > self.small_lead_threshold
+
+        im_carrying = gameState.getAgentState(self.index).numCarrying
+
+        should_attack = False
+        for food in self.getFood():
+            advantage = self.get_advantage(
+                food, gameState, advantages, teammate=self.index
+            )
+            teammate_advantage = self.get_advantage(
+                food, gameState, advantages, teammate=(self.index + 2) % 4
+            )
+            if advantage > 1 and advantage > teammate_advantage:
+                should_attack = True
+                break
+
+        if im_carrying > 0 and (
+            can_win or gameState.data.timeleft <= time_to_nearest_escape
+        ):
+            act = "escape"
+        elif (should_attack and not winning) or losing:
+            act = "attack"
+        else:
+            act = "defend"
+
+        self.lowLevelPlan = self.getLowLevelPlanHS(gameState, act)
+        self.lowLevelActionIndex = 0
 
         # Safety check in case plan is still empty
         if not self.lowLevelPlan or self.lowLevelActionIndex >= len(self.lowLevelPlan):
@@ -381,30 +325,7 @@ class MixedAgent(CaptureAgent):
         # print("\tAgent:", self.index,lowLevelAction)
         return lowLevelAction
 
-    # ------------------------------- PDDL and High-Level Action Functions -------------------------------
-
-    def getHighLevelPlan(
-        self, objects, initState, positiveGoal, negtiveGoal
-    ) -> List[Tuple[Action, pddl_state]]:
-        """
-        This function prepare the pddl problem, solve it and return pddl plan
-        """
-        # Prepare pddl problem
-        self.pddl_solver.parser_.reset_problem()
-        self.pddl_solver.parser_.set_objects(objects)
-        self.pddl_solver.parser_.set_state(initState)
-        self.pddl_solver.parser_.set_negative_goals(negtiveGoal)
-        self.pddl_solver.parser_.set_positive_goals(positiveGoal)
-
-        # Solve the problem and return the plan
-        return self.pddl_solver.solve()
-
-    def get_pddl_state(self, gameState: GameState) -> Tuple[List[Tuple], List[Tuple]]:
-        """
-        This function collects pddl :objects and :init states from simulator gameState.
-        """
-        pass
-
+    @profile
     def stateSatisfyCurrentPlan(
         self, init_state: List[Tuple], positiveGoal, negtiveGoal
     ):
@@ -445,28 +366,6 @@ class MixedAgent(CaptureAgent):
 
         # Current action precondition not satisfied anymore, need new plan
         return False
-
-    def getGoals(self, objects: List[Tuple], initState: List[Tuple]):
-        """
-        Multi-tiered goal prioritization system based on game state.
-        Returns positive and negative goal states for PDDL planning.
-        """
-        pass
-
-    def posSatisfyLowLevelPlan(self, gameState: GameState):
-        if (
-            self.lowLevelPlan == None
-            or len(self.lowLevelPlan) == 0
-            or self.lowLevelActionIndex >= len(self.lowLevelPlan)
-        ):
-            return False
-        myPos = gameState.getAgentPosition(self.index)
-        nextPos = Actions.getSuccessor(
-            myPos, self.lowLevelPlan[self.lowLevelActionIndex][0]
-        )
-        if nextPos != self.lowLevelPlan[self.lowLevelActionIndex][1]:
-            return False
-        return True
 
     @profile
     def getLowLevelPlanHS(
@@ -1027,6 +926,11 @@ class MixedAgent(CaptureAgent):
         """
         Finds the current advantages at each cell: {(x, y) : (agent_1 dist, agent_2 dist, ...))
         """
+        cachable = all(gameState.getAgentPosition(i) is not None for i in range(4))
+
+        if cachable and gameState in MixedAgent.CACHED_ADVANTAGES:
+            return MixedAgent.CACHED_ADVANTAGES[gameState]
+
         walls = gameState.getWalls()
         width, height = walls.width, walls.height
 
@@ -1053,7 +957,11 @@ class MixedAgent(CaptureAgent):
             + self.getEscapePoints()
             + self.getEscapePointsYouAreDefending()
             + [gameState.getAgentPosition(self.index)]
+            + [gameState.getAgentPosition((self.index + 2) % 4)]
         )
+        if cachable:
+            for opp in self.getOpponents(gameState):
+                tiles.add(gameState.getAgentPosition(opp))
 
         for x in range(width):
             for y in range(height):
@@ -1097,8 +1005,12 @@ class MixedAgent(CaptureAgent):
 
                             advantages[node_pos].append(distance)
 
+        if cachable:
+            MixedAgent.CACHED_ADVANTAGES[gameState] = advantages
+
         return advantages
 
+    @profile
     def get_advantage(
         self, pos, gameState, advantages, teammate=None, enemy=None, max_lookahead=50
     ):
@@ -1696,6 +1608,7 @@ def initialize_beliefs(
     return beliefs
 
 
+@profile
 def update_belief(
     prev_belief: List[List[float]],
     game_state: GameState,
@@ -1806,6 +1719,7 @@ def update_belief(
     return updated_belief
 
 
+@profile
 def update_all_beliefs(
     prev_beliefs: Dict[int, List[List[float]]],
     game_state: GameState,
@@ -1839,149 +1753,3 @@ def update_all_beliefs(
         )
 
     return updated_beliefs
-
-
-# ====================SEARCH STUFF==========================================
-
-from lib_piglet.utils.tools import eprint
-from lib_piglet.search import (
-    tree_search,
-    graph_search,
-    base_search,
-    search_node,
-    iterative_deepening,
-    graph_search_anytime,
-)
-from lib_piglet.utils.data_structure import queue, stack, bin_heap
-from lib_piglet.expanders.base_expander import base_expander
-from lib_piglet.solution.solution import solution_to_state_list
-
-debug = False
-
-
-def getPossibleActions(pos, walls):
-    possible = []
-    x, y = pos
-    x_int, y_int = int(x + 0.5), int(y + 0.5)
-
-    for dir, vec in Actions._directionsAsList:
-        dx, dy = vec
-        next_y = y_int + dy
-        next_x = x_int + dx
-        if not walls[next_x][next_y]:
-            possible.append(dir)
-
-    return possible
-
-
-class PacAct:
-    def __init__(self, cost):
-        self.cost_ = cost
-
-
-# The search state is a tuple of location and interception time from path start
-# (x, y, int), with the default value for int being -1
-
-
-class pacman_expander(base_expander):
-    def __init__(self, gameState: GameState, agent: MixedAgent, max_timestep=9999):
-        self.domain_ = agent
-        self.domain_.is_goal = lambda node, goals: any(
-            all(node[i] == goal[i] for i in range(2)) for goal in goals
-        )
-        self.gameState = gameState
-        self.succ_: list = []
-        self.max_timestep = max_timestep
-        self.verbose = False
-
-    def expand(self, current_node: search_node):
-        self.succ_.clear()
-        state = current_node.state_
-        x, y, inter = state
-        pos = (x, y)
-        walls = self.gameState.getWalls()
-        successors_acts = []
-
-        valid_transitions = getPossibleActions(pos, walls)
-        if self.verbose:
-            print(f"currently at cell {state[:2]}")
-
-        for act in valid_transitions:
-            new_pos = Actions.getSuccessor(pos, act)
-            if self.verbose:
-                print(f"    looking at transition to {new_pos}")
-
-            # we need to check for interception
-            adv = self.domain_.get_advantage(
-                new_pos, self.gameState, MixedAgent.CURRENT_ADVANTAGES
-            )
-            # intercept time is -1 until an interception is detected.
-            # subsequent successors will all have the same intercept time
-
-            # we still have adv / we've already been intercepted
-            if adv > 0 or self.domain_.isInHome(new_pos) or inter >= 0:
-                successors_acts.append(((*new_pos, inter), PacAct(1)))
-            # we just got intercepted
-            else:
-                successors_acts.append(
-                    ((*new_pos, current_node.g_ + (adv // 2) + 1), PacAct(1))
-                )
-        else:
-            successors_acts.append(((*new_pos, inter), PacAct(1)))
-
-        return successors_acts
-
-    def __str__(self):
-        return self.domain_.domain_file_
-
-
-# = true_maze_dist + (99999 - intercept_time) IF intercept time >= 0
-# ELSE = true_maze_dist
-# should be used when finding food, calculating escape path, etc...
-# ALWAYS PASS IN AN ITERABLE OF GOAL STATES
-def offensive_heuristic(domain: MixedAgent, current_state, goal_state):
-    agent = domain
-    dist = min(
-        agent.getMazeDistance(current_state[:2], g_state[:2]) for g_state in goal_state
-    )
-    inter_time = current_state[-1]
-    if inter_time >= 0:
-        dist += 99999999 - inter_time * 500
-    return dist
-
-
-from collections.abc import Iterable
-
-
-def get_path(
-    start: tuple,
-    goals: Iterable,
-    agent: MixedAgent,
-    gameState: GameState,
-    heuristic,
-    max_timestep: int = None,
-):
-    """Returns path and time until intercept. time = -1 if not intercepted"""
-    if not hasattr(get_path, "pac_searcher"):
-        open_lst = bin_heap(search_node.compare_node_f)
-        get_path.pac_searcher = graph_search.graph_search(
-            open_lst,
-            expander=pacman_expander(gameState, agent),
-            heuristic_function=heuristic,
-        )
-    else:
-        get_path.pac_searcher.expander_.domain_ = agent
-        get_path.pac_searcher.expander_.gameState = gameState
-
-    assert isinstance(goals[0], Iterable), "goals should be an iterable of state tuples"
-
-    path = get_path.pac_searcher.get_path((*start, -1), goals)
-    assert path is not None, "didn't find any valid paths? this should not happen"
-
-    path = path.paths_
-    print(path)
-    intercept_t = path[-1].state_[-1]
-
-    path = [state.state_[0:2] for state in path]
-    print(get_path.pac_searcher.get_statistic())
-    return path, intercept_t
