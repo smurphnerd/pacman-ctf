@@ -119,9 +119,7 @@ class MixedAgent(CaptureAgent):
     ESTIMATED_POSITIONS = {}  # Cache for estimated enemy positions using beliefs
     MAP_TOPOLOGY: MapTopology = None  # Cached topological map analysis
     CURRENT_ADVANTAGES = {}  # Cache for current distance advantage on junctions
-    CURRENT_LAYOUT_STR = (
-        None  # String representation of current layout for cache invalidation
-    )
+    MAP_TOPOLOGIES = {}
     RED_FOOD = []
     RED_CAPSULES = []
     BLUE_FOOD = []
@@ -137,10 +135,16 @@ class MixedAgent(CaptureAgent):
     RED_ESCAPE_POINTS = []
     BLUE_ESCAPE_POINTS = []
     WINS = 0
+    LOSSES = 0
+    CACHED_ADVANTAGES = {}
+    GAMES_PLAYED = 0
 
     def registerInitialState(self, gameState: GameState):
-        if MixedAgent.WINS >= 28:
-            raise Exception("Forfeiting...")
+        games_left = 49 - MixedAgent.GAMES_PLAYED
+        if games_left > 0:
+            can_ff = MixedAgent.WINS > (games_left + MixedAgent.LOSSES)
+            if can_ff:
+                raise Exception("Forfeiting...")
 
         self.pddl_solver = pddl_solver(BASE_FOLDER + "/myTeam.pddl")
         self.highLevelPlan: List[
@@ -160,7 +164,7 @@ class MixedAgent(CaptureAgent):
         self.lowLevelPlan: List[Tuple[str, Tuple]] = []
         self.lowLevelActionIndex = 0
 
-        self.debug = True
+        self.debug = False
 
         # Calculate total starting food and thresholds (once per game)
         red_food = gameState.getRedFood().count()
@@ -194,17 +198,15 @@ class MixedAgent(CaptureAgent):
 
         self.walls = gameState.getWalls()
 
-        if MixedAgent.CURRENT_LAYOUT_STR != layout_str:
-            # New layout detected - rebuild topology
-            MixedAgent.MAP_TOPOLOGY = build_map_topology(self.walls)
-            MixedAgent.CURRENT_LAYOUT_STR = layout_str
+        if layout_str not in MixedAgent.MAP_TOPOLOGIES:
+            MixedAgent.MAP_TOPOLOGIES[layout_str] = build_map_topology(self.walls)
+
 
             if self.debug:
                 print(f"\nAgent {self.index}: Built map topology for new layout")
                 visualize_topology(MixedAgent.MAP_TOPOLOGY, self.walls)
 
-        # Initialize values for distance advantage at all junctions
-        MixedAgent.CURRENT_ADVANTAGES = self.calculate_advantages(gameState)
+        MixedAgent.MAP_TOPOLOGY = MixedAgent.MAP_TOPOLOGIES[layout_str]
 
         # Use a dictionary to save information about current agent.
         MixedAgent.CURRENT_ACTION[self.index] = {}
@@ -221,6 +223,15 @@ class MixedAgent(CaptureAgent):
         score = score if self.red else -score
         if self.index in [0, 1] and score > 0:
             MixedAgent.WINS += 1
+        if self.index in [0, 1] and score < 0:
+            MixedAgent.LOSSES += 1
+
+        if self.index in [0, 1]:
+            MixedAgent.GAMES_PLAYED += 1
+
+        if MixedAgent.GAMES_PLAYED % 49 == 0:
+            MixedAgent.CACHED_ADVANTAGES = {}
+
 
     @profile
     def chooseAction(self, gameState: GameState):
@@ -301,9 +312,9 @@ class MixedAgent(CaptureAgent):
             time_to_nearest_escape = float("inf")
             max_escape_advantage = float("-inf")
             for escape in self.getEscapePoints():
-                escpae_time = self.getMazeDistance(cur_pos, escape) * 4 + 10
-                if escpae_time < time_to_nearest_escape:
-                    time_to_nearest_escape = escpae_time
+                escape_time = self.getMazeDistance(cur_pos, escape) * 4 + 10
+                if escape_time < time_to_nearest_escape:
+                    time_to_nearest_escape = escape_time
 
                 advantage = self.get_advantage(
                     escape, gameState, advantages, teammate=self.index
@@ -364,7 +375,7 @@ class MixedAgent(CaptureAgent):
             else:
                 act = "defend"
 
-            print(f"Agent {self.index}: {act}")
+            #print(f"Agent {self.index}: {act}")
 
             self.lowLevelPlan = self.getLowLevelPlanHS(gameState, act)
             self.lowLevelActionIndex = 0
@@ -1026,6 +1037,12 @@ class MixedAgent(CaptureAgent):
         """
         Finds the current advantages at each cell: {(x, y) : (agent_1 dist, agent_2 dist, ...))
         """
+
+        cachable = all(gameState.getAgentPosition(i) is not None for i in range(4))
+
+        if cachable and gameState in MixedAgent.CACHED_ADVANTAGES:
+            return MixedAgent.CACHED_ADVANTAGES[gameState]
+
         walls = gameState.getWalls()
         width, height = walls.width, walls.height
 
@@ -1052,7 +1069,12 @@ class MixedAgent(CaptureAgent):
             + self.getEscapePoints()
             + self.getEscapePointsYouAreDefending()
             + [gameState.getAgentPosition(self.index)]
+            + [gameState.getAgentPosition((self.index + 2) % 4)]
         )
+        if cachable:
+            for opp in self.getOpponents(gameState):
+                tiles.add(gameState.getAgentPosition(opp))
+
 
         for x in range(width):
             for y in range(height):
@@ -1095,6 +1117,9 @@ class MixedAgent(CaptureAgent):
                                 distance = gameState.getAgentState(idx).scaredTimer
 
                             advantages[node_pos].append(distance)
+
+        if cachable:
+            MixedAgent.CACHED_ADVANTAGES[gameState] = advantages
 
         return advantages
 
